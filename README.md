@@ -40,3 +40,12 @@ cp .env.example .env   # 토큰 입력
 - 본 레포는 **MCP 도구 코드**만 담음
 - 게임 레포(`EternalDreams/`)는 별도. AGENTS.md / 기획서.md / 내파트.md / 플랜.md / 체크리스트.md 가 거기 위치
 - `.env`의 `GAME_PROJECT_PATH`로 게임 레포를 가리킴
+
+## 운영 모드
+
+| 모드 | 트리거 위치 | 추가 세팅 |
+|---|---|---|
+| 수동 | 본인 터미널의 Claude Code/Codex/Cursor | 위의 빠른 시작·도구 등록만 |
+| 자동 | Discord 채널 (예: "회의 완료" 한 줄) | PM 머신에 [Claude Code Channels](https://code.claude.com/docs/en/channels) Discord 플러그인 + 백그라운드 상시 세션. 자세한 절차는 SETUP.md `Channels 자동화 모드` 섹션 |
+
+자동 모드에서도 본 MCP 서버 코드는 **수정 없이 그대로** 동작한다. Channels는 Discord 메시지를 Claude 세션에 푸시하기만 하고, 실제 작업은 동일하게 본 MCP 툴이 수행한다.

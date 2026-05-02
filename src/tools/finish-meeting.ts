@@ -19,7 +19,10 @@ export const finishMeetingTool: Tool = {
     properties: {
       invoker_id: {
         type: "string",
-        description: "호출자 Discord user ID (ALLOWED_USERS 검증 대상)",
+        description:
+          "호출자 Discord user ID (snowflake, 긴 숫자). " +
+          "ALLOWED_USERS 검증 대상이며 username이 아닌 ID여야 함. " +
+          "Discord 메시지로 트리거된 경우 메시지 메타데이터의 author.id를 그대로 전달.",
       },
       summary: {
         type: "string",

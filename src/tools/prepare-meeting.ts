@@ -16,7 +16,9 @@ export const prepareMeetingTool: Tool = {
     properties: {
       user_name: {
         type: "string",
-        description: "스크럼 보고자 이름 (git --author 매칭에 사용)",
+        description:
+          "스크럼 보고자 이름 (git --author 매칭에 사용). " +
+          "Discord 메시지로 트리거된 경우 메시지 작성자의 표시 이름을 그대로 전달.",
       },
     },
     required: ["user_name"],
