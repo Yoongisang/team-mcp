@@ -1,0 +1,42 @@
+# Team MCP Server
+
+UE5 팀 프로젝트용 AI 협업 MCP 서버. Claude Code · Codex · Cursor 어디서든 동일하게 동작.
+
+## 빠른 시작
+
+```bash
+git clone https://github.com/<your-org>/team-mcp
+cd team-mcp
+npm install
+npm run build
+cp .env.example .env   # 토큰 입력
+```
+
+## 도구 등록
+
+각 도구에서 SETUP.md를 보고 자동 세팅:
+
+- **Claude Code**: `claude` 실행 → `"SETUP.md 보고 등록해줘"`
+- **Codex**: `codex` 실행 → `"SETUP.md 보고 등록해줘"`
+- **Cursor**: `cursor` 실행 → `"SETUP.md 보고 등록해줘"`
+
+수동 등록 예시는 SETUP.md 참고.
+
+## 노출 툴
+
+| 툴 | 설명 |
+|---|---|
+| `get_team_rules` | AGENTS.md 내용 반환 |
+| `show_progress` | 체크리스트 진행률·지연 항목 |
+| `create_plan` | 기획서 + 내파트 → 플랜 + 체크리스트 |
+| `complete_task` | 항목 완료 처리 + 다음 작업 추천 |
+| `change_direction` | 방향 변경 영향 분석 + 수정안 |
+| `update_plan` | 플랜 직접 수정 |
+| `prepare_meeting` | git log + 진행률 → Discord 스크럼 채널 |
+| `finish_meeting` | Discord 수집 → 아카이브 → Notion + Jira (PM/팀장만) |
+
+## 게임 레포와의 관계
+
+- 본 레포는 **MCP 도구 코드**만 담음
+- 게임 레포(`EternalDreams/`)는 별도. AGENTS.md / 기획서.md / 내파트.md / 플랜.md / 체크리스트.md 가 거기 위치
+- `.env`의 `GAME_PROJECT_PATH`로 게임 레포를 가리킴
