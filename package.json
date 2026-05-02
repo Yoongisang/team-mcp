@@ -1,0 +1,31 @@
+{
+  "name": "team-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Team AI collaboration MCP server (UE5 project pipeline)",
+  "type": "module",
+  "main": "dist/server.js",
+  "bin": {
+    "team-mcp": "dist/server.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/server.ts",
+    "start": "node dist/server.js",
+    "inspect": "npm run build && npx @modelcontextprotocol/inspector node dist/server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "dotenv": "^16.4.5",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/inspector": "^0.21.2",
+    "@types/node": "^22.7.5",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

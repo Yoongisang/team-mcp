@@ -1,0 +1,59 @@
+import { gameFileExists, readGameFile, writeGameFile } from "./files.js";
+
+export const STATE_FILE = ".scrum-state.json";
+
+export interface Completion {
+  task: string;
+  completedAt: string;
+}
+
+export interface ScrumState {
+  completions: Completion[];
+  lastPrepareMeetingAt: string | null;
+}
+
+const DEFAULT_STATE: ScrumState = {
+  completions: [],
+  lastPrepareMeetingAt: null,
+};
+
+export async function loadState(): Promise<ScrumState> {
+  if (!(await gameFileExists(STATE_FILE))) {
+    return { ...DEFAULT_STATE, completions: [] };
+  }
+  try {
+    const raw = await readGameFile(STATE_FILE);
+    const parsed = JSON.parse(raw) as Partial<ScrumState>;
+    return {
+      completions: Array.isArray(parsed.completions) ? parsed.completions : [],
+      lastPrepareMeetingAt: parsed.lastPrepareMeetingAt ?? null,
+    };
+  } catch {
+    return { ...DEFAULT_STATE, completions: [] };
+  }
+}
+
+export async function saveState(state: ScrumState): Promise<void> {
+  await writeGameFile(STATE_FILE, JSON.stringify(state, null, 2), {
+    overwrite: true,
+  });
+}
+
+export function estimateCompletionDate(
+  state: ScrumState,
+  remainingItems: number,
+  now: Date = new Date(),
+): string | null {
+  if (remainingItems === 0) return null;
+  const cs = state.completions;
+  if (cs.length < 2) return null;
+  const first = Date.parse(cs[0]!.completedAt);
+  const last = Date.parse(cs[cs.length - 1]!.completedAt);
+  if (!Number.isFinite(first) || !Number.isFinite(last)) return null;
+  const span = last - first;
+  if (span <= 0) return null;
+  const ratePerMs = cs.length / span;
+  const msNeeded = remainingItems / ratePerMs;
+  const eta = new Date(now.getTime() + msNeeded);
+  return eta.toISOString().slice(0, 10);
+}
