@@ -106,4 +106,79 @@ export class JiraClient {
       url: `https://${this.host}/browse/${data.key}`,
     };
   }
+
+  async getBoardId(projectKey: string): Promise<number | null> {
+    try {
+      const boards = (await this.request(
+        `/rest/agile/1.0/board?projectKeyOrId=${projectKey}&type=scrum`,
+      )) as { values?: Array<{ id: number }> };
+      return boards.values?.[0]?.id ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  async createSprint(
+    boardId: number,
+    name: string,
+    startDate: string,
+    endDate: string,
+  ): Promise<number | null> {
+    try {
+      const sprint = (await this.request("/rest/agile/1.0/sprint", {
+        method: "POST",
+        body: { name, originBoardId: boardId, startDate, endDate },
+      })) as { id: number };
+      // 생성된 스프린트 활성화
+      await this.request(`/rest/agile/1.0/sprint/${sprint.id}`, {
+        method: "PUT",
+        body: { state: "active", startDate, endDate },
+      });
+      return sprint.id;
+    } catch (e) {
+      console.error("[team-mcp] createSprint failed:", e);
+      return null;
+    }
+  }
+
+  async moveIssuesToSprint(sprintId: number, issueKeys: string[]): Promise<void> {
+    if (issueKeys.length === 0) return;
+    await this.request(`/rest/agile/1.0/sprint/${sprintId}/issue`, {
+      method: "POST",
+      body: { issues: issueKeys },
+    });
+  }
+
+  async searchIssues(jql: string): Promise<Array<{ key: string; summary: string }>> {
+    try {
+      const data = (await this.request("/rest/api/3/issue/search", {
+        method: "POST",
+        body: { jql, fields: ["summary", "status"], maxResults: 50 },
+      })) as { issues?: Array<{ key: string; fields: { summary: string } }> };
+      return (data.issues ?? []).map((i) => ({
+        key: i.key,
+        summary: i.fields.summary,
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  async transitionIssueToDone(issueKey: string): Promise<void> {
+    const data = (await this.request(
+      `/rest/api/3/issue/${issueKey}/transitions`,
+    )) as { transitions?: Array<{ id: string; name: string }> };
+    const transitions = data.transitions ?? [];
+    const done = transitions.find(
+      (t) =>
+        t.name.toLowerCase() === "done" ||
+        t.name === "완료" ||
+        t.name.toLowerCase().includes("done"),
+    );
+    if (!done) throw new Error(`${issueKey}: Done 트랜지션 없음`);
+    await this.request(`/rest/api/3/issue/${issueKey}/transitions`, {
+      method: "POST",
+      body: { transition: { id: done.id } },
+    });
+  }
 }

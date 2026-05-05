@@ -43,6 +43,19 @@ export const finishMeetingTool: Tool = {
         type: "string",
         description: "회의록 제목 (기본: '스크럼 회의록 YYYY-MM-DD')",
       },
+      sprint_end_date: {
+        type: "string",
+        description:
+          "스프린트 종료일 (YYYY-MM-DD). 회의에서 언급된 가장 늦은 마감일. " +
+          "제공 시 오늘~해당일로 스프린트를 자동 생성하고 이슈를 넣는다.",
+      },
+      completed_task_names: {
+        type: "array",
+        items: { type: "string" },
+        description:
+          "이번 회의에서 완료됐다고 언급된 작업명 목록. " +
+          "Jira에서 유사한 이슈를 찾아 Done 처리.",
+      },
     },
     required: ["invoker_id"],
     additionalProperties: false,
@@ -54,6 +67,8 @@ const Args = z.object({
   summary: z.string().optional(),
   action_items: z.array(z.string()).optional(),
   title: z.string().optional(),
+  sprint_end_date: z.string().optional(),
+  completed_task_names: z.array(z.string()).optional(),
 });
 
 function formatMessage(m: DiscordMessage): string {
@@ -105,7 +120,9 @@ export async function finishMeeting(raw: unknown) {
       "  - summary: 회의 요약",
       "  - action_items: 액션 아이템 배열",
       "  - title (선택): 회의록 제목",
-      "재호출 시 락 획득 → Notion + Jira 작성 → 원본 스레드 태그 [진행]→[완료] → 새 [정리] 스레드 생성을 수행한다.",
+      "  - sprint_end_date (선택): 회의에서 언급된 가장 늦은 마감일 YYYY-MM-DD",
+      "  - completed_task_names (선택): 완료됐다고 언급된 작업명 목록",
+      "재호출 시 락 획득 → Notion + Jira 작성 → 스프린트 생성/이슈 이동 → 완료 처리 → 원본 스레드 태그 [진행]→[완료] → 새 [정리] 스레드 생성을 수행한다.",
     ].join("\n");
     return { content: [{ type: "text" as const, text }] };
   }
@@ -203,6 +220,43 @@ export async function finishMeeting(raw: unknown) {
       labels: ["scrum-meeting"],
     });
 
+    // ── 완료 처리: 이번 회의에서 완료된 작업 → 이전 이슈 Done 처리 ──
+    const completedResults: string[] = [];
+    for (const taskName of args.completed_task_names ?? []) {
+      try {
+        const escaped = taskName.replace(/"/g, '\\"');
+        const found = await jira.searchIssues(
+          `project = "${jiraProject}" AND summary ~ "${escaped}" AND status != Done ORDER BY created DESC`,
+        );
+        if (found.length > 0) {
+          await jira.transitionIssueToDone(found[0]!.key);
+          completedResults.push(`${found[0]!.key} (${found[0]!.summary})`);
+        }
+      } catch (e) {
+        completedResults.push(`실패: ${taskName} — ${e}`);
+      }
+    }
+
+    // ── 스프린트 생성: sprint_end_date 있으면 자동 생성 후 이슈 이동 ──
+    let sprintInfo = "(스프린트 없음 — sprint_end_date 미제공)";
+    if (args.sprint_end_date) {
+      const boardId = await jira.getBoardId(jiraProject);
+      if (boardId) {
+        const today = new Date().toISOString().slice(0, 10);
+        const sprintName = `Sprint ${today} ~ ${args.sprint_end_date}`;
+        const newSprintId = await jira.createSprint(boardId, sprintName, today, args.sprint_end_date);
+        if (newSprintId) {
+          const keys = [...actionIssues.map((i) => i.key), summaryIssue.key];
+          await jira.moveIssuesToSprint(newSprintId, keys);
+          sprintInfo = `${sprintName} (ID: ${newSprintId})`;
+        } else {
+          sprintInfo = "(스프린트 생성 실패)";
+        }
+      } else {
+        sprintInfo = "(보드 조회 실패)";
+      }
+    }
+
     // 원본 스레드 태그 [진행] → [완료] 교체
     await discord.setThreadTags(threadId, [completedTagId!]);
 
@@ -249,6 +303,8 @@ export async function finishMeeting(raw: unknown) {
             `  Notion: ${notionPage.url}\n` +
             `  Jira 액션 아이템: ${actionIssues.length}개 (${actionIssues.map(i => i.key).join(", ")})\n` +
             `  Jira 회의 요약: ${summaryIssue.url}\n` +
+            `  스프린트: ${sprintInfo}\n` +
+            `  완료 처리: ${completedResults.length > 0 ? completedResults.join(", ") : "없음"}\n` +
             `  락 ID: ${acquired.id} (TTL ${acquired.expiresAt})`,
         },
       ],
