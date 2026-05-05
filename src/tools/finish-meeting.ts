@@ -200,46 +200,18 @@ export async function finishMeeting(raw: unknown) {
       return undefined;
     }
 
-    // ── 보드 조회 + 스프린트 캐시 (endDate → sprintId) ───────────────
-    const boardId = await jira.getBoardId(jiraProject);
-    const sprintCache = new Map<string, number>();
-    const sprintNames = new Map<string, string>();
-
-    async function resolveSprintId(endDate: string | undefined): Promise<number | null> {
-      if (!endDate) return null;
-      if (!boardId) return null;
-      if (sprintCache.has(endDate)) return sprintCache.get(endDate)!;
-      const id = await jira.getOrCreateSprintByEndDate(boardId, endDate, today);
-      if (id !== null) {
-        sprintCache.set(endDate, id);
-        sprintNames.set(endDate, `Sprint ~${endDate}`);
-      }
-      return id;
-    }
-
-    // ── 액션 아이템별 Jira Task 생성 (마감일 스프린트에 직접 넣기) ──
+    // ── 액션 아이템별 Jira Task 생성 (백로그) ──
     const actionIssues: CreatedIssue[] = [];
     for (const item of args.action_items) {
-      const deadline = parseDateFromItem(item);
-      const itemSprintId = await resolveSprintId(deadline);
       const issue = await jira.createIssue({
         projectKey: jiraProject,
         summary: item,
         description: `회의록 참조: ${notionPage.url}`,
         issueType: config.jira.taskType,
-        sprintId: itemSprintId,
         labels: ["scrum-action-item"],
       });
       actionIssues.push(issue);
     }
-
-    // ── 회의 요약 이슈: 가장 늦은 마감일 스프린트에 ──────────────────
-    const latestDeadline = args.action_items
-      .map(parseDateFromItem)
-      .filter((d): d is string => !!d)
-      .sort()
-      .at(-1);
-    const summarySprintId = await resolveSprintId(latestDeadline);
 
     const jiraDescription = [
       args.summary,
@@ -255,16 +227,10 @@ export async function finishMeeting(raw: unknown) {
       summary: title,
       description: jiraDescription,
       issueType: config.jira.taskType,
-      sprintId: summarySprintId,
       labels: ["scrum-meeting"],
     });
 
-    // ── 스프린트 요약 정보 ──────────────────────────────────────────
-    const sprintInfo = sprintCache.size > 0
-      ? [...sprintNames.values()].join(", ")
-      : boardId === null
-        ? `백로그에 생성됨 (보드 조회 실패 — project: ${jiraProject})`
-        : "(날짜 정보 없음 — 백로그에 생성됨)";
+    const sprintInfo = "백로그에 생성됨 (무료 요금제 — 스프린트 배정은 Jira UI에서)";
 
     // ── 완료 처리: 이번 회의에서 완료된 작업 → 이전 이슈 Done 처리 ──
     const completedResults: string[] = [];
