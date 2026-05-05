@@ -6,7 +6,7 @@ import {
   resolveForumTagIds,
   type DiscordMessage,
 } from "../lib/discord.js";
-import { JiraClient } from "../lib/jira.js";
+import { JiraClient, type CreatedIssue } from "../lib/jira.js";
 import { NotionLock } from "../lib/lock.js";
 import { NotionClient } from "../lib/notion.js";
 import { checkPermission } from "../lib/safety.js";
@@ -167,19 +167,40 @@ export async function finishMeeting(raw: unknown) {
       notionBody,
     );
 
+    // 활성 스프린트 조회 (실패해도 이슈 생성은 계속)
+    const sprintId = await jira.getActiveSprintId(jiraProject);
+
+    // 액션 아이템별 개별 Jira Task 생성
+    const actionIssues: CreatedIssue[] = [];
+    for (const item of args.action_items) {
+      const issue = await jira.createIssue({
+        projectKey: jiraProject,
+        summary: item,
+        description: `회의록 참조: ${notionPage.url}`,
+        issueType: "Task",
+        sprintId,
+        labels: ["scrum-action-item"],
+      });
+      actionIssues.push(issue);
+    }
+
+    // 회의 요약 Jira Task 생성
     const jiraDescription = [
       args.summary,
       "",
-      "Action items:",
-      itemsBlock || "(none)",
+      "Action Items:",
+      args.action_items.map((it, i) => `${i + 1}. ${it}`).join("\n"),
       "",
       `Notion: ${notionPage.url}`,
     ].join("\n");
 
-    const jiraIssue = await jira.createIssue({
+    const summaryIssue = await jira.createIssue({
       projectKey: jiraProject,
       summary: title,
       description: jiraDescription,
+      issueType: "Task",
+      sprintId,
+      labels: ["scrum-meeting"],
     });
 
     // 원본 스레드 태그 [진행] → [완료] 교체
@@ -187,19 +208,22 @@ export async function finishMeeting(raw: unknown) {
 
     // [정리] 태그 새 스레드 생성
     const summaryThreadName = `스크럼 회의 정리 ${today}`;
+    const jiraActionLinks = actionIssues
+      .map((iss, i) => `- [${iss.key}] ${args.action_items![i]}: ${iss.url}`)
+      .join("\n");
     const summaryContent = [
       `# ${title}`,
       "",
       "## 요약",
       args.summary,
       "",
-      "## 액션 아이템",
-      itemsBlock || "(없음)",
+      "## 액션 아이템 (Jira 티켓)",
+      jiraActionLinks || "(없음)",
       "",
       "## 링크",
       `- 원본 회의 스레드: <#${threadId}>`,
       `- Notion: ${notionPage.url}`,
-      `- Jira: ${jiraIssue.url}`,
+      `- Jira 회의 요약: ${summaryIssue.url}`,
     ].join("\n");
 
     const { thread: summaryThread } = await discord.createForumThread(
@@ -223,7 +247,8 @@ export async function finishMeeting(raw: unknown) {
             `  원본 스레드 태그: [${config.discord.tagInProgress}] → [${config.discord.tagCompleted}]\n` +
             `  정리 스레드: ${summaryThread.id} (${summaryThread.name})\n` +
             `  Notion: ${notionPage.url}\n` +
-            `  Jira: ${jiraIssue.url}\n` +
+            `  Jira 액션 아이템: ${actionIssues.length}개 (${actionIssues.map(i => i.key).join(", ")})\n` +
+            `  Jira 회의 요약: ${summaryIssue.url}\n` +
             `  락 ID: ${acquired.id} (TTL ${acquired.expiresAt})`,
         },
       ],

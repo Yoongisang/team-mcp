@@ -11,6 +11,101 @@ export interface CreatedPage {
   url: string;
 }
 
+type RichText = {
+  type: "text";
+  text: { content: string };
+  annotations?: Record<string, boolean>;
+};
+
+/** 인라인 마크다운(`code`, **bold**)을 RichText 배열로 변환 */
+function parseInline(text: string): RichText[] {
+  const result: RichText[] = [];
+  const re = /(`[^`]+`|\*\*[^*]+\*\*)/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) {
+      result.push({ type: "text", text: { content: text.slice(last, m.index) } });
+    }
+    const raw = m[0]!;
+    if (raw.startsWith("`")) {
+      result.push({
+        type: "text",
+        text: { content: raw.slice(1, -1) },
+        annotations: { code: true },
+      });
+    } else {
+      result.push({
+        type: "text",
+        text: { content: raw.slice(2, -2) },
+        annotations: { bold: true },
+      });
+    }
+    last = m.index + raw.length;
+  }
+  if (last < text.length) {
+    result.push({ type: "text", text: { content: text.slice(last) } });
+  }
+  return result.length ? result : [{ type: "text", text: { content: "" } }];
+}
+
+/** 마크다운 문자열을 Notion 블록 배열로 변환 (최대 95개) */
+function markdownToBlocks(markdown: string): unknown[] {
+  const lines = markdown.split("\n");
+  const blocks: unknown[] = [];
+
+  for (const raw of lines) {
+    if (blocks.length >= 95) break;
+    const line = raw.slice(0, 1900);
+
+    if (line.startsWith("# ")) {
+      blocks.push({
+        object: "block", type: "heading_1",
+        heading_1: { rich_text: parseInline(line.slice(2)) },
+      });
+    } else if (line.startsWith("## ")) {
+      blocks.push({
+        object: "block", type: "heading_2",
+        heading_2: { rich_text: parseInline(line.slice(3)) },
+      });
+    } else if (line.startsWith("### ")) {
+      blocks.push({
+        object: "block", type: "heading_3",
+        heading_3: { rich_text: parseInline(line.slice(4)) },
+      });
+    } else if (/^- \[.\] /.test(line)) {
+      const checked = line[3] === "x";
+      blocks.push({
+        object: "block", type: "to_do",
+        to_do: { rich_text: parseInline(line.slice(6)), checked },
+      });
+    } else if (/^- /.test(line)) {
+      blocks.push({
+        object: "block", type: "bulleted_list_item",
+        bulleted_list_item: { rich_text: parseInline(line.slice(2)) },
+      });
+    } else if (/^\d+\. /.test(line)) {
+      blocks.push({
+        object: "block", type: "numbered_list_item",
+        numbered_list_item: { rich_text: parseInline(line.replace(/^\d+\. /, "")) },
+      });
+    } else if (line.startsWith("---")) {
+      blocks.push({ object: "block", type: "divider", divider: {} });
+    } else if (line === "") {
+      blocks.push({
+        object: "block", type: "paragraph",
+        paragraph: { rich_text: [] },
+      });
+    } else {
+      blocks.push({
+        object: "block", type: "paragraph",
+        paragraph: { rich_text: parseInline(line) },
+      });
+    }
+  }
+  return blocks;
+}
+
 export class NotionClient {
   constructor(private readonly token: string) {}
 
@@ -88,19 +183,6 @@ export class NotionClient {
     title: string,
     body: string,
   ): Promise<CreatedPage> {
-    const blocks = body
-      .split("\n")
-      .slice(0, 95)
-      .map((line) => ({
-        object: "block",
-        type: "paragraph",
-        paragraph: {
-          rich_text: line
-            ? [{ type: "text", text: { content: line.slice(0, 1900) } }]
-            : [],
-        },
-      }));
-
     const data = (await this.request("/pages", {
       method: "POST",
       body: {
@@ -108,7 +190,7 @@ export class NotionClient {
         properties: {
           title: { title: [{ text: { content: title } }] },
         },
-        children: blocks,
+        children: markdownToBlocks(body),
       },
     })) as { id: string; url: string };
     return { id: data.id, url: data.url };

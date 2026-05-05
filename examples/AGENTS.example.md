@@ -10,7 +10,8 @@
 
 | 입력 | 호출 |
 |---|---|
-| "plan 만들어줘" / "플랜 짜줘" | `create_plan` |
+| "초기 세팅" / "프로젝트 시작" / "플랜 처음부터" | 기획서·내파트 질문 후 `create_plan({ spec_content, my_part_content })` |
+| "plan 만들어줘" / "플랜 짜줘" | `create_plan` (기획서.md·내파트.md 이미 있을 때) |
 | "GA_X 완료" / "X 끝남" | `complete_task({ task_name: "X" })` |
 | "방향 변경: ..." / "...로 전환" | `change_direction` |
 | "회의 준비" / "스크럼" | `prepare_meeting({ user_name: 메시지 작성자 })` |

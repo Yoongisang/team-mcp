@@ -68,6 +68,43 @@ args = ["<absolute-path-to>/team-mcp/dist/server.js"]
    - `/mcp` 명령으로 `team-mcp ✓ connected` 확인
    - `"진행 상황 보여줘"` 또는 `show_progress` 직접 호출 → 정상 응답이면 OK
 
+7. **초기 프로젝트 세팅 (최초 1회)** — MCP 연결 확인 후 바로 진행:
+
+   사용자에게 아래 두 가지를 순서대로 물어보고, 답변을 받은 뒤 `create_plan`을 호출해 플랜과 체크리스트를 생성한다.
+
+   **질문 1 — 기획서**
+   > "게임 기획서 내용을 알려주세요. 장르, 핵심 기능, 기술 스택, 마일스톤 등을 자유롭게 적어주시면 됩니다."
+
+   **질문 2 — 내 파트**
+   > "본인이 담당하는 파트(시스템·기능 목록)를 알려주세요. 예: GA_Attack 구현, 인벤토리 UI, 네트워크 동기화 등"
+
+   두 답변을 받으면:
+   ```
+   create_plan({
+     spec_content: "<질문1 답변>",
+     my_part_content: "<질문2 답변>"
+   })
+   ```
+   → 기획서.md + 내파트.md 저장 후 컨텍스트 수집 → AI가 분석 →
+   ```
+   create_plan({
+     plan_markdown: "<분석 결과>",
+     checklist_markdown: "<체크리스트>"
+   })
+   ```
+   → 플랜.md + 체크리스트.md 생성 완료
+
+   > 기획서.md / 내파트.md가 이미 게임 레포에 있으면 이 단계는 생략하고 `create_plan`을 바로 호출해도 됨.
+
+8. **게임 레포에 AGENTS.md 복사 (최초 1회)**:
+
+   team-mcp 레포의 `AGENTS.md`를 게임 레포 루트에 복사한다.
+   ```bash
+   copy C:\team-mcp\AGENTS.md C:\Users\...\GameProject\AGENTS.md
+   ```
+   이후 Claude Code · Codex가 게임 프로젝트에서 열릴 때 자동으로 읽어 툴 트리거 매핑이 동작한다.
+   팀 규칙(코드 스타일·커밋 규칙 등)이 있으면 이 파일 앞에 합쳐서 사용한다.
+
 ## Discord 사전 준비 (PM 1회)
 
 `finish_meeting`/`prepare_meeting`이 동작하려면 Discord에 다음을 미리 만든다:
