@@ -13,11 +13,19 @@ export const config = {
     get userId() {
       return env("DISCORD_USER_ID");
     },
+    /** 회의 포럼 채널 ID. 진행/완료/정리 태그가 모두 여기에 있어야 함. */
     get scrumChannelId() {
       return env("DISCORD_SCRUM_CHANNEL_ID");
     },
-    get archiveChannelId() {
-      return env("DISCORD_ARCHIVE_CHANNEL_ID");
+    /** 포럼 태그명 — 기본값 사용 시 포럼에 정확히 이 이름으로 태그를 만들어둬야 함. */
+    get tagInProgress() {
+      return env("DISCORD_TAG_IN_PROGRESS") || "진행";
+    },
+    get tagCompleted() {
+      return env("DISCORD_TAG_COMPLETED") || "완료";
+    },
+    get tagSummary() {
+      return env("DISCORD_TAG_SUMMARY") || "정리";
     },
   },
   notion: {

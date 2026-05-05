@@ -1,7 +1,7 @@
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { config, requireConfig } from "../config.js";
-import { DiscordClient } from "../lib/discord.js";
+import { DiscordClient, resolveForumTagIds } from "../lib/discord.js";
 import { GAME_FILES, gameFileExists, readGameFile } from "../lib/files.js";
 import { gitLog } from "../lib/git.js";
 import { parseChecklist, progress } from "../lib/markdown.js";
@@ -10,7 +10,11 @@ import { loadState, saveState } from "../lib/state.js";
 export const prepareMeetingTool: Tool = {
   name: "prepare_meeting",
   description:
-    "마지막 prepare_meeting 이후의 git 커밋과 체크리스트 진행률을 종합해 Discord 스크럼 채널로 전송한다. 전송 후 타임스탬프를 갱신해 다음 호출 시 중복 보고를 방지한다.",
+    "마지막 prepare_meeting 이후의 git 커밋과 체크리스트 진행률을 모아 " +
+    "Discord 포럼 채널에 [진행] 태그로 새 회의 스레드를 생성한다. " +
+    "이후 스크럼은 이 스레드의 댓글로 진행되며, finish_meeting 호출 시 " +
+    "댓글들을 수집해 Notion·Jira에 정리한다. 전송 후 타임스탬프와 " +
+    "thread ID를 state에 저장해 다음 호출 시 중복 보고를 방지한다.",
   inputSchema: {
     type: "object",
     properties: {
@@ -31,7 +35,7 @@ const Args = z.object({ user_name: z.string().min(1) });
 export async function prepareMeeting(raw: unknown) {
   const { user_name } = Args.parse(raw);
   const token = requireConfig(config.discord.botToken, "DISCORD_BOT_TOKEN");
-  const channelId = requireConfig(
+  const forumId = requireConfig(
     config.discord.scrumChannelId,
     "DISCORD_SCRUM_CHANNEL_ID",
   );
@@ -77,10 +81,24 @@ export async function prepareMeeting(raw: unknown) {
   ].join("\n");
 
   const client = new DiscordClient(token);
-  const messageIds = await client.postChunked(channelId, report);
+  const forum = await client.getChannel(forumId);
+  const [inProgressTagId] = resolveForumTagIds(forum, [
+    config.discord.tagInProgress,
+  ]);
+
+  const today = new Date().toISOString().slice(0, 10);
+  const threadName = `스크럼 회의 ${today}`;
+
+  const { thread, followupMessageIds } = await client.createForumThread(
+    forumId,
+    threadName,
+    report,
+    [inProgressTagId!],
+  );
 
   const now = new Date().toISOString();
   state.lastPrepareMeetingAt = now;
+  state.currentMeetingThreadId = thread.id;
   await saveState(state);
 
   return {
@@ -88,11 +106,14 @@ export async function prepareMeeting(raw: unknown) {
       {
         type: "text" as const,
         text:
-          `Discord 전송 완료\n` +
-          `  채널: ${channelId}\n` +
-          `  메시지 수: ${messageIds.length}\n` +
-          `  메시지 ID: ${messageIds.join(", ")}\n` +
-          `  타임스탬프 갱신: ${now}`,
+          `포럼 회의 스레드 생성 완료\n` +
+          `  포럼: ${forumId}\n` +
+          `  스레드: ${thread.id} (${thread.name})\n` +
+          `  태그: [${config.discord.tagInProgress}]\n` +
+          `  추가 메시지: ${followupMessageIds.length}건\n` +
+          `  타임스탬프 갱신: ${now}\n\n` +
+          `이제 스크럼은 위 스레드의 댓글로 진행하세요. ` +
+          `회의가 끝나면 finish_meeting을 호출하면 됩니다.`,
       },
     ],
   };

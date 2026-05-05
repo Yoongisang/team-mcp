@@ -10,6 +10,30 @@ export interface DiscordMessage {
   timestamp: string;
 }
 
+export interface ForumTag {
+  id: string;
+  name: string;
+  moderated?: boolean;
+  emoji_id?: string | null;
+  emoji_name?: string | null;
+}
+
+export interface DiscordChannel {
+  id: string;
+  type: number;
+  name?: string;
+  parent_id?: string | null;
+  applied_tags?: string[];
+  available_tags?: ForumTag[];
+}
+
+export interface DiscordThread {
+  id: string;
+  name: string;
+  parent_id: string;
+  applied_tags?: string[];
+}
+
 export class DiscordClient {
   constructor(private readonly token: string) {}
 
@@ -94,4 +118,73 @@ export class DiscordClient {
       { messages: messageIds },
     );
   }
+
+  async getChannel(channelId: string): Promise<DiscordChannel> {
+    const res = await this.request("GET", `/channels/${channelId}`);
+    return (await res.json()) as DiscordChannel;
+  }
+
+  /**
+   * 포럼 채널에 새 스레드(게시글) 생성. content는 첫 메시지로 들어가며
+   * Discord 한도(2000자)를 넘으면 첫 청크만 본문에 들어가고 나머지는 댓글로 추가된다.
+   */
+  async createForumThread(
+    forumId: string,
+    name: string,
+    content: string,
+    appliedTags: string[] = [],
+  ): Promise<{ thread: DiscordThread; followupMessageIds: string[] }> {
+    const chunks = chunkForDiscord(content);
+    const first = chunks[0] ?? "";
+    const rest = chunks.slice(1);
+
+    const res = await this.request("POST", `/channels/${forumId}/threads`, {
+      name,
+      auto_archive_duration: 1440,
+      applied_tags: appliedTags,
+      message: { content: first },
+    });
+    const thread = (await res.json()) as DiscordThread;
+
+    const followupMessageIds: string[] = [];
+    for (const c of rest) {
+      const m = await this.postMessage(thread.id, c);
+      followupMessageIds.push(m.id);
+    }
+    return { thread, followupMessageIds };
+  }
+
+  /**
+   * 스레드에 적용된 태그 교체. 빈 배열이면 모든 태그 제거.
+   */
+  async setThreadTags(
+    threadId: string,
+    appliedTags: string[],
+  ): Promise<DiscordThread> {
+    const res = await this.request("PATCH", `/channels/${threadId}`, {
+      applied_tags: appliedTags,
+    });
+    return (await res.json()) as DiscordThread;
+  }
+}
+
+/**
+ * 포럼 채널의 available_tags에서 이름으로 ID 찾기. 없으면 명확한 에러.
+ */
+export function resolveForumTagIds(
+  forum: DiscordChannel,
+  names: string[],
+): string[] {
+  const available = forum.available_tags ?? [];
+  return names.map((n) => {
+    const found = available.find((t) => t.name === n);
+    if (!found) {
+      const have = available.map((t) => t.name).join(", ") || "(없음)";
+      throw new Error(
+        `포럼 태그 '${n}'를 찾을 수 없음. 포럼 채널(${forum.name ?? forum.id})의 ` +
+          `사용 가능한 태그: ${have}. 포럼 설정에서 태그를 만들어주세요.`,
+      );
+    }
+    return found.id;
+  });
 }

@@ -11,7 +11,8 @@
    - `GAME_PROJECT_PATH` — 게임 레포 절대 경로 (예: `C:\Users\me\projects\EternalDreams`)
    - `DISCORD_BOT_TOKEN` (PM이 공유)
    - `DISCORD_USER_ID` (본인)
-   - `DISCORD_SCRUM_CHANNEL_ID`, `DISCORD_ARCHIVE_CHANNEL_ID`
+   - `DISCORD_SCRUM_CHANNEL_ID` (**포럼 채널** ID — 텍스트 채널 아님)
+   - `DISCORD_TAG_IN_PROGRESS` / `DISCORD_TAG_COMPLETED` / `DISCORD_TAG_SUMMARY` (선택, 기본값 `진행`/`완료`/`정리`)
    - `NOTION_API_KEY`, `NOTION_PARENT_PAGE_ID`, `NOTION_LOCK_DB_ID` (PM/팀장만)
    - `JIRA_API_TOKEN`, `JIRA_EMAIL`, `JIRA_HOST`, `JIRA_PROJECT_KEY` (PM/팀장만)
    - `ALLOWED_USERS` (PM/팀장 Discord ID 목록, 콤마 구분)
@@ -54,6 +55,20 @@ args = ["<absolute-path-to>/team-mcp/dist/server.js"]
 6. 테스트:
    - 도구 재시작
    - `"진행 상황 보여줘"` 또는 `show_progress` 직접 호출 → 정상 응답이면 OK
+
+## Discord 사전 준비 (PM 1회)
+
+`finish_meeting`/`prepare_meeting`이 동작하려면 Discord에 다음을 미리 만든다:
+
+1. **회의 포럼 채널** 1개 생성 (텍스트 채널 아님 — 채널 만들 때 "포럼" 유형 선택).
+2. 포럼 채널의 **태그 설정**에서 다음 3개 태그를 정확히 이 이름으로 생성:
+   - `진행` — prepare_meeting이 만든 회의 스레드에 자동 부착
+   - `완료` — finish_meeting이 회의 종료 시 부착
+   - `정리` — finish_meeting이 새로 만든 요약 스레드에 부착
+
+   태그명을 바꾸려면 `.env`의 `DISCORD_TAG_IN_PROGRESS`/`DISCORD_TAG_COMPLETED`/`DISCORD_TAG_SUMMARY`를 설정.
+3. 포럼 채널 ID를 `DISCORD_SCRUM_CHANNEL_ID`에 입력.
+4. 봇에 다음 권한 부여: `채널 보기`, `메시지 보내기`, `스레드에서 메시지 보내기`, `메시지 기록 보기`, `메시지 관리`(태그 변경에 필요).
 
 ## Notion 사전 준비 (PM/팀장만)
 

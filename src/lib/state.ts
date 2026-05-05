@@ -10,11 +10,14 @@ export interface Completion {
 export interface ScrumState {
   completions: Completion[];
   lastPrepareMeetingAt: string | null;
+  /** 진행 중인 포럼 회의 스레드 ID. prepare_meeting이 설정, finish_meeting이 클리어. */
+  currentMeetingThreadId: string | null;
 }
 
 const DEFAULT_STATE: ScrumState = {
   completions: [],
   lastPrepareMeetingAt: null,
+  currentMeetingThreadId: null,
 };
 
 export async function loadState(): Promise<ScrumState> {
@@ -27,6 +30,7 @@ export async function loadState(): Promise<ScrumState> {
     return {
       completions: Array.isArray(parsed.completions) ? parsed.completions : [],
       lastPrepareMeetingAt: parsed.lastPrepareMeetingAt ?? null,
+      currentMeetingThreadId: parsed.currentMeetingThreadId ?? null,
     };
   } catch {
     return { ...DEFAULT_STATE, completions: [] };
