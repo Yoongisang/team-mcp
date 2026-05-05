@@ -237,8 +237,38 @@ export async function finishMeeting(raw: unknown) {
       }
     }
 
+    // ── sprint_end_date 미제공 시 action_items에서 자동 파싱 ──
+    // 패턴: "5/7까지", "5월7일까지", "05-07까지" 등에서 가장 늦은 날짜 추출
+    function parseDatesFromItems(items: string[]): string | undefined {
+      const year = new Date().getFullYear();
+      const dates: Date[] = [];
+      for (const item of items) {
+        // 패턴 1: M/D 또는 MM/DD
+        for (const m of item.matchAll(/(\d{1,2})\/(\d{1,2})/g)) {
+          dates.push(new Date(year, parseInt(m[1]!) - 1, parseInt(m[2]!)));
+        }
+        // 패턴 2: M월D일 또는 MM월DD일
+        for (const m of item.matchAll(/(\d{1,2})월\s*(\d{1,2})일/g)) {
+          dates.push(new Date(year, parseInt(m[1]!) - 1, parseInt(m[2]!)));
+        }
+        // 패턴 3: YYYY-MM-DD
+        for (const m of item.matchAll(/(\d{4})-(\d{2})-(\d{2})/g)) {
+          dates.push(new Date(parseInt(m[1]!), parseInt(m[2]!) - 1, parseInt(m[3]!)));
+        }
+      }
+      if (dates.length === 0) return undefined;
+      const latest = new Date(Math.max(...dates.map((d) => d.getTime())));
+      return latest.toISOString().slice(0, 10);
+    }
+
+    const resolvedEndDate =
+      args.sprint_end_date ?? parseDatesFromItems(args.action_items);
+
     // ── 스프린트 생성: sprint_end_date 있으면 자동 생성 후 이슈 이동 ──
-    let sprintInfo = "(스프린트 없음 — sprint_end_date 미제공)";
+    let sprintInfo = "(스프린트 없음 — 날짜 정보 없음)";
+    if (resolvedEndDate) {
+      args.sprint_end_date = resolvedEndDate; // 이하 코드에서 재사용
+    }
     if (args.sprint_end_date) {
       const boardId = await jira.getBoardId(jiraProject);
       if (boardId) {
