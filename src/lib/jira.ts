@@ -108,14 +108,21 @@ export class JiraClient {
   }
 
   async getBoardId(projectKey: string): Promise<number | null> {
-    try {
-      const boards = (await this.request(
-        `/rest/agile/1.0/board?projectKeyOrId=${projectKey}&type=scrum`,
-      )) as { values?: Array<{ id: number }> };
-      return boards.values?.[0]?.id ?? null;
-    } catch {
-      return null;
+    // 팀 관리형 프로젝트는 type=scrum 필터에 걸리지 않으므로 type 없이 조회 먼저 시도
+    for (const query of [
+      `/rest/agile/1.0/board?projectKeyOrId=${projectKey}`,
+      `/rest/agile/1.0/board?projectKeyOrId=${projectKey}&type=scrum`,
+    ]) {
+      try {
+        const boards = (await this.request(query)) as { values?: Array<{ id: number; type?: string }> };
+        const id = boards.values?.[0]?.id ?? null;
+        if (id !== null) return id;
+        console.error(`[team-mcp] getBoardId: no board for query "${query}", values:`, JSON.stringify(boards.values));
+      } catch (e) {
+        console.error(`[team-mcp] getBoardId failed query "${query}":`, String(e));
+      }
     }
+    return null;
   }
 
   /**

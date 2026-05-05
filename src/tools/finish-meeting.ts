@@ -206,7 +206,8 @@ export async function finishMeeting(raw: unknown) {
     const sprintNames = new Map<string, string>();
 
     async function resolveSprintId(endDate: string | undefined): Promise<number | null> {
-      if (!endDate || !boardId) return null;
+      if (!endDate) return null;
+      if (!boardId) return null;
       if (sprintCache.has(endDate)) return sprintCache.get(endDate)!;
       const id = await jira.getOrCreateSprintByEndDate(boardId, endDate, today);
       if (id !== null) {
@@ -261,7 +262,9 @@ export async function finishMeeting(raw: unknown) {
     // ── 스프린트 요약 정보 ──────────────────────────────────────────
     const sprintInfo = sprintCache.size > 0
       ? [...sprintNames.values()].join(", ")
-      : "(날짜 정보 없음 — 백로그에 생성됨)";
+      : boardId === null
+        ? `백로그에 생성됨 (보드 조회 실패 — project: ${jiraProject})`
+        : "(날짜 정보 없음 — 백로그에 생성됨)";
 
     // ── 완료 처리: 이번 회의에서 완료된 작업 → 이전 이슈 Done 처리 ──
     const completedResults: string[] = [];
