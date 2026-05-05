@@ -244,13 +244,15 @@ export async function finishMeeting(raw: unknown) {
       if (boardId) {
         const today = new Date().toISOString().slice(0, 10);
         const sprintName = `Sprint ${today} ~ ${args.sprint_end_date}`;
-        const newSprintId = await jira.createSprint(boardId, sprintName, today, args.sprint_end_date);
-        if (newSprintId) {
-          const keys = [...actionIssues.map((i) => i.key), summaryIssue.key];
-          await jira.moveIssuesToSprint(newSprintId, keys);
-          sprintInfo = `${sprintName} (ID: ${newSprintId})`;
-        } else {
-          sprintInfo = "(스프린트 생성 실패)";
+        try {
+          const newSprintId = await jira.createSprint(boardId, sprintName, today, args.sprint_end_date);
+          if (newSprintId) {
+            const keys = [...actionIssues.map((i) => i.key), summaryIssue.key];
+            await jira.moveIssuesToSprint(newSprintId, keys);
+            sprintInfo = `${sprintName} (ID: ${newSprintId})`;
+          }
+        } catch (e) {
+          sprintInfo = `(스프린트 생성 실패: ${String(e).slice(0, 200)})`;
         }
       } else {
         sprintInfo = "(보드 조회 실패)";

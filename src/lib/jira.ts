@@ -129,15 +129,15 @@ export class JiraClient {
         method: "POST",
         body: { name, originBoardId: boardId, startDate, endDate },
       })) as { id: number };
-      // 생성된 스프린트 활성화
+      // 생성된 스프린트 활성화 (POST = partial update)
       await this.request(`/rest/agile/1.0/sprint/${sprint.id}`, {
-        method: "PUT",
-        body: { state: "active", startDate, endDate },
+        method: "POST",
+        body: { state: "active", name, startDate, endDate },
       });
       return sprint.id;
     } catch (e) {
-      console.error("[team-mcp] createSprint failed:", e);
-      return null;
+      console.error("[team-mcp] createSprint failed:", String(e));
+      throw e; // 상위에서 sprintInfo에 에러 메시지 반영되도록 rethrow
     }
   }
 
