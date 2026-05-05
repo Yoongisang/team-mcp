@@ -16,20 +16,31 @@
    - `NOTION_API_KEY`, `NOTION_PARENT_PAGE_ID`, `NOTION_LOCK_DB_ID` (PM/팀장만)
    - `JIRA_API_TOKEN`, `JIRA_EMAIL`, `JIRA_HOST`, `JIRA_PROJECT_KEY` (PM/팀장만)
    - `ALLOWED_USERS` (PM/팀장 Discord ID 목록, 콤마 구분)
-5. 현재 도구 설정 파일에 MCP 서버 등록:
+5. MCP 서버 등록:
 
-### Claude Code — `.claude/settings.json`
+### Claude Code (v2.1+) — `claude mcp add` 명령 사용
 
-```json
-{
-  "mcpServers": {
-    "team-mcp": {
-      "command": "node",
-      "args": ["<absolute-path-to>/team-mcp/dist/server.js"]
-    }
-  }
-}
+> ⚠️ Claude Code v2.1+에서는 `settings.json`의 `mcpServers` 필드가 인식되지 않음.
+> 반드시 아래 CLI 명령으로 등록해야 `~/.claude.json`에 올바르게 저장됨.
+
+**Windows:**
+```bash
+claude mcp add team-mcp "C:/Program Files/nodejs/node.exe" "C:/절대경로/team-mcp/dist/server.js" --scope user
 ```
+
+**macOS/Linux:**
+```bash
+claude mcp add team-mcp node /절대경로/team-mcp/dist/server.js --scope user
+```
+
+등록 확인:
+```bash
+claude mcp list
+# 출력 예시: team-mcp: node /path/to/team-mcp/dist/server.js - ✓ Connected
+```
+
+> `.env` 파일이 team-mcp 디렉토리에 있으면 서버 시작 시 자동으로 로드됨.
+> `--env KEY=VALUE` 플래그로 직접 넘길 수도 있지만, `.env` 방식을 권장.
 
 ### Codex — `~/.codex/config.toml`
 
@@ -53,7 +64,8 @@ args = ["<absolute-path-to>/team-mcp/dist/server.js"]
 ```
 
 6. 테스트:
-   - 도구 재시작
+   - Claude Code 완전히 종료 후 재시작
+   - `/mcp` 명령으로 `team-mcp ✓ connected` 확인
    - `"진행 상황 보여줘"` 또는 `show_progress` 직접 호출 → 정상 응답이면 OK
 
 ## Discord 사전 준비 (PM 1회)
