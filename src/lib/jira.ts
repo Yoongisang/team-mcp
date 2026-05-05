@@ -92,13 +92,24 @@ export class JiraClient {
       issuetype: { name: opts.issueType ?? "Task" },
     };
     if (description) fields.description = description;
-    if (opts.sprintId) fields.customfield_10020 = opts.sprintId;
     if (opts.labels?.length) fields.labels = opts.labels;
 
     const data = (await this.request("/rest/api/3/issue", {
       method: "POST",
       body: { fields },
     })) as { key: string; id: string };
+
+    // 스프린트 배정: 이슈 생성 후 별도 API로 추가 (customfield_10020 직접 설정 시 오류)
+    if (opts.sprintId) {
+      try {
+        await this.request(`/rest/agile/1.0/sprint/${opts.sprintId}/issue`, {
+          method: "POST",
+          body: { issues: [data.key] },
+        });
+      } catch (e) {
+        console.error(`[team-mcp] sprint 배정 실패 (${data.key}):`, String(e));
+      }
+    }
 
     return {
       key: data.key,
