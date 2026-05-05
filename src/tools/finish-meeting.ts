@@ -184,24 +184,62 @@ export async function finishMeeting(raw: unknown) {
       notionBody,
     );
 
-    // 활성 스프린트 조회 (실패해도 이슈 생성은 계속)
-    const sprintId = await jira.getActiveSprintId(jiraProject);
+    // ── 마감일 파싱 헬퍼 ──────────────────────────────────────────────
+    function parseDateFromItem(text: string): string | undefined {
+      const year = new Date().getFullYear();
+      let m: RegExpMatchArray | null;
+      // M/D 또는 MM/DD
+      m = text.match(/(\d{1,2})\/(\d{1,2})/);
+      if (m) return new Date(year, +m[1]! - 1, +m[2]!).toISOString().slice(0, 10);
+      // M월D일
+      m = text.match(/(\d{1,2})월\s*(\d{1,2})일/);
+      if (m) return new Date(year, +m[1]! - 1, +m[2]!).toISOString().slice(0, 10);
+      // YYYY-MM-DD
+      m = text.match(/(\d{4})-(\d{2})-(\d{2})/);
+      if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+      return undefined;
+    }
 
-    // 액션 아이템별 개별 Jira Task 생성
+    // ── 보드 조회 + 스프린트 캐시 (endDate → sprintId) ───────────────
+    const boardId = await jira.getBoardId(jiraProject);
+    const sprintCache = new Map<string, number>();
+    const sprintNames = new Map<string, string>();
+
+    async function resolveSprintId(endDate: string | undefined): Promise<number | null> {
+      if (!endDate || !boardId) return null;
+      if (sprintCache.has(endDate)) return sprintCache.get(endDate)!;
+      const id = await jira.getOrCreateSprintByEndDate(boardId, endDate, today);
+      if (id !== null) {
+        sprintCache.set(endDate, id);
+        sprintNames.set(endDate, `Sprint ~${endDate}`);
+      }
+      return id;
+    }
+
+    // ── 액션 아이템별 Jira Task 생성 (마감일 스프린트에 직접 넣기) ──
     const actionIssues: CreatedIssue[] = [];
     for (const item of args.action_items) {
+      const deadline = parseDateFromItem(item);
+      const itemSprintId = await resolveSprintId(deadline);
       const issue = await jira.createIssue({
         projectKey: jiraProject,
         summary: item,
         description: `회의록 참조: ${notionPage.url}`,
         issueType: "Task",
-        sprintId,
+        sprintId: itemSprintId,
         labels: ["scrum-action-item"],
       });
       actionIssues.push(issue);
     }
 
-    // 회의 요약 Jira Task 생성
+    // ── 회의 요약 이슈: 가장 늦은 마감일 스프린트에 ──────────────────
+    const latestDeadline = args.action_items
+      .map(parseDateFromItem)
+      .filter((d): d is string => !!d)
+      .sort()
+      .at(-1);
+    const summarySprintId = await resolveSprintId(latestDeadline);
+
     const jiraDescription = [
       args.summary,
       "",
@@ -216,9 +254,14 @@ export async function finishMeeting(raw: unknown) {
       summary: title,
       description: jiraDescription,
       issueType: "Task",
-      sprintId,
+      sprintId: summarySprintId,
       labels: ["scrum-meeting"],
     });
+
+    // ── 스프린트 요약 정보 ──────────────────────────────────────────
+    const sprintInfo = sprintCache.size > 0
+      ? [...sprintNames.values()].join(", ")
+      : "(날짜 정보 없음 — 백로그에 생성됨)";
 
     // ── 완료 처리: 이번 회의에서 완료된 작업 → 이전 이슈 Done 처리 ──
     const completedResults: string[] = [];
@@ -234,58 +277,6 @@ export async function finishMeeting(raw: unknown) {
         }
       } catch (e) {
         completedResults.push(`실패: ${taskName} — ${e}`);
-      }
-    }
-
-    // ── sprint_end_date 미제공 시 action_items에서 자동 파싱 ──
-    // 패턴: "5/7까지", "5월7일까지", "05-07까지" 등에서 가장 늦은 날짜 추출
-    function parseDatesFromItems(items: string[]): string | undefined {
-      const year = new Date().getFullYear();
-      const dates: Date[] = [];
-      for (const item of items) {
-        // 패턴 1: M/D 또는 MM/DD
-        for (const m of item.matchAll(/(\d{1,2})\/(\d{1,2})/g)) {
-          dates.push(new Date(year, parseInt(m[1]!) - 1, parseInt(m[2]!)));
-        }
-        // 패턴 2: M월D일 또는 MM월DD일
-        for (const m of item.matchAll(/(\d{1,2})월\s*(\d{1,2})일/g)) {
-          dates.push(new Date(year, parseInt(m[1]!) - 1, parseInt(m[2]!)));
-        }
-        // 패턴 3: YYYY-MM-DD
-        for (const m of item.matchAll(/(\d{4})-(\d{2})-(\d{2})/g)) {
-          dates.push(new Date(parseInt(m[1]!), parseInt(m[2]!) - 1, parseInt(m[3]!)));
-        }
-      }
-      if (dates.length === 0) return undefined;
-      const latest = new Date(Math.max(...dates.map((d) => d.getTime())));
-      return latest.toISOString().slice(0, 10);
-    }
-
-    const resolvedEndDate =
-      args.sprint_end_date ?? parseDatesFromItems(args.action_items);
-
-    // ── 스프린트 생성: sprint_end_date 있으면 자동 생성 후 이슈 이동 ──
-    let sprintInfo = "(스프린트 없음 — 날짜 정보 없음)";
-    if (resolvedEndDate) {
-      args.sprint_end_date = resolvedEndDate; // 이하 코드에서 재사용
-    }
-    if (args.sprint_end_date) {
-      const boardId = await jira.getBoardId(jiraProject);
-      if (boardId) {
-        const today = new Date().toISOString().slice(0, 10);
-        const sprintName = `Sprint ${today} ~ ${args.sprint_end_date}`;
-        try {
-          const newSprintId = await jira.createSprint(boardId, sprintName, today, args.sprint_end_date);
-          if (newSprintId) {
-            const keys = [...actionIssues.map((i) => i.key), summaryIssue.key];
-            await jira.moveIssuesToSprint(newSprintId, keys);
-            sprintInfo = `${sprintName} (ID: ${newSprintId})`;
-          }
-        } catch (e) {
-          sprintInfo = `(스프린트 생성 실패: ${String(e).slice(0, 200)})`;
-        }
-      } else {
-        sprintInfo = "(보드 조회 실패)";
       }
     }
 

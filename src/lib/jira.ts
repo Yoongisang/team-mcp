@@ -118,35 +118,41 @@ export class JiraClient {
     }
   }
 
-  async createSprint(
+  /**
+   * endDate(YYYY-MM-DD)가 일치하는 스프린트를 찾아 반환.
+   * 없으면 새로 생성. 이슈 생성 시 sprintId로 직접 사용.
+   */
+  async getOrCreateSprintByEndDate(
     boardId: number,
-    name: string,
-    startDate: string,
     endDate: string,
+    today: string,
   ): Promise<number | null> {
     try {
+      // future/active 스프린트 중 endDate가 일치하는 것 검색
+      for (const state of ["future", "active"]) {
+        const data = (await this.request(
+          `/rest/agile/1.0/board/${boardId}/sprint?state=${state}&maxResults=50`,
+        )) as { values?: Array<{ id: number; endDate?: string }> };
+        const found = (data.values ?? []).find((s) =>
+          s.endDate?.startsWith(endDate),
+        );
+        if (found) return found.id;
+      }
+      // 없으면 새 스프린트 생성
       const sprint = (await this.request("/rest/agile/1.0/sprint", {
         method: "POST",
-        body: { name, originBoardId: boardId, startDate, endDate },
+        body: {
+          name: `Sprint ~${endDate}`,
+          originBoardId: boardId,
+          startDate: today,
+          endDate,
+        },
       })) as { id: number };
-      // 생성된 스프린트 활성화 (POST = partial update)
-      await this.request(`/rest/agile/1.0/sprint/${sprint.id}`, {
-        method: "POST",
-        body: { state: "active", name, startDate, endDate },
-      });
       return sprint.id;
     } catch (e) {
-      console.error("[team-mcp] createSprint failed:", String(e));
-      throw e; // 상위에서 sprintInfo에 에러 메시지 반영되도록 rethrow
+      console.error("[team-mcp] getOrCreateSprintByEndDate failed:", String(e));
+      return null;
     }
-  }
-
-  async moveIssuesToSprint(sprintId: number, issueKeys: string[]): Promise<void> {
-    if (issueKeys.length === 0) return;
-    await this.request(`/rest/agile/1.0/sprint/${sprintId}/issue`, {
-      method: "POST",
-      body: { issues: issueKeys },
-    });
   }
 
   async searchIssues(jql: string): Promise<Array<{ key: string; summary: string }>> {
