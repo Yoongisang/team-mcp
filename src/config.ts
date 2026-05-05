@@ -52,6 +52,9 @@ export const config = {
     get projectKey() {
       return env("JIRA_PROJECT_KEY");
     },
+    get taskType() {
+      return env("JIRA_TASK_TYPE") || "Task";
+    },
   },
   get allowedUsers() {
     return env("ALLOWED_USERS")

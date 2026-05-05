@@ -226,7 +226,7 @@ export async function finishMeeting(raw: unknown) {
         projectKey: jiraProject,
         summary: item,
         description: `회의록 참조: ${notionPage.url}`,
-        issueType: "Task",
+        issueType: config.jira.taskType,
         sprintId: itemSprintId,
         labels: ["scrum-action-item"],
       });
@@ -254,7 +254,7 @@ export async function finishMeeting(raw: unknown) {
       projectKey: jiraProject,
       summary: title,
       description: jiraDescription,
-      issueType: "Task",
+      issueType: config.jira.taskType,
       sprintId: summarySprintId,
       labels: ["scrum-meeting"],
     });
