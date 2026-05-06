@@ -11,6 +11,13 @@ import { NotionLock } from "../lib/lock.js";
 import { NotionClient } from "../lib/notion.js";
 import { checkPermission } from "../lib/safety.js";
 import { loadState, saveState } from "../lib/state.js";
+import {
+  GAME_FILES,
+  gameFileExists,
+  readGameFile,
+  writeGameFile,
+} from "../lib/files.js";
+import { parseChecklist, setItemDone, joinLines } from "../lib/markdown.js";
 
 export const finishMeetingTool: Tool = {
   name: "finish_meeting",
@@ -104,13 +111,52 @@ export async function finishMeeting(raw: unknown) {
     .filter((m) => m.author && !m.author.username.endsWith("[BOT]"))
     .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
 
+  // ── 확인 대기 항목 처리 ────────────────────────────────────────────────
+  const pending = state.pendingConfirmations ?? [];
+  const confirmedItems: string[] = [];
+
+  if (pending.length > 0 && messages.length > 0) {
+    // 사용자 메시지에서 확인 번호 파싱 (예: "1 2", "1번 3번", "1,2,3")
+    const confirmedIndexes = new Set<number>();
+    for (const msg of messages) {
+      const nums = [...msg.content.matchAll(/\b(\d+)번?\b/g)].map(m => parseInt(m[1]!, 10));
+      nums.forEach(n => confirmedIndexes.add(n));
+    }
+
+    if (confirmedIndexes.size > 0 && await gameFileExists(GAME_FILES.checklist)) {
+      const raw = await readGameFile(GAME_FILES.checklist);
+      const { items, lines } = parseChecklist(raw);
+      let updatedLines = lines;
+
+      for (const p of pending) {
+        if (!confirmedIndexes.has(p.index)) continue;
+        const target = items.find(i => !i.done && i.text === p.itemText);
+        if (target) {
+          updatedLines = setItemDone(updatedLines, target, true);
+          confirmedItems.push(p.itemText);
+        }
+      }
+
+      if (confirmedItems.length > 0) {
+        await writeGameFile(GAME_FILES.checklist, joinLines(updatedLines), { overwrite: true });
+        state.pendingConfirmations = pending.filter(
+          p => !confirmedItems.includes(p.itemText),
+        );
+        await saveState(state);
+      }
+    }
+  }
+
   if (!args.summary || !args.action_items) {
     const ctx = messages.length === 0
       ? "(수집된 댓글 없음)"
       : messages.map(formatMessage).join("\n");
+    const confirmedNote = confirmedItems.length > 0
+      ? `\n\n> ✅ 확인 완료로 체크리스트 갱신: ${confirmedItems.join(", ")}`
+      : "";
     const text = [
       "# 회의록 작성 컨텍스트",
-      `_스레드: ${threadId}, 댓글 ${messages.length}건._`,
+      `_스레드: ${threadId}, 댓글 ${messages.length}건._${confirmedNote}`,
       "",
       "## 스레드 댓글",
       ctx,
@@ -292,6 +338,7 @@ export async function finishMeeting(raw: unknown) {
 
     // state 클리어
     state.currentMeetingThreadId = null;
+    state.pendingConfirmations = [];
     await saveState(state);
 
     return {

@@ -7,17 +7,26 @@ export interface Completion {
   completedAt: string;
 }
 
+export interface PendingConfirmation {
+  index: number;       // 1-based, Discord 메시지에서 사용자가 입력할 번호
+  itemText: string;    // 체크리스트 항목 텍스트
+  commitSubject: string; // 매칭된 커밋 제목
+}
+
 export interface ScrumState {
   completions: Completion[];
   lastPrepareMeetingAt: string | null;
   /** 진행 중인 포럼 회의 스레드 ID. prepare_meeting이 설정, finish_meeting이 클리어. */
   currentMeetingThreadId: string | null;
+  /** 사용자 확인 대기 중인 체크리스트 항목. finish_meeting에서 처리 후 클리어. */
+  pendingConfirmations: PendingConfirmation[];
 }
 
 const DEFAULT_STATE: ScrumState = {
   completions: [],
   lastPrepareMeetingAt: null,
   currentMeetingThreadId: null,
+  pendingConfirmations: [],
 };
 
 export async function loadState(): Promise<ScrumState> {
@@ -31,6 +40,7 @@ export async function loadState(): Promise<ScrumState> {
       completions: Array.isArray(parsed.completions) ? parsed.completions : [],
       lastPrepareMeetingAt: parsed.lastPrepareMeetingAt ?? null,
       currentMeetingThreadId: parsed.currentMeetingThreadId ?? null,
+      pendingConfirmations: Array.isArray(parsed.pendingConfirmations) ? parsed.pendingConfirmations : [],
     };
   } catch {
     return { ...DEFAULT_STATE, completions: [] };

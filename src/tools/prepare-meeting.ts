@@ -11,7 +11,7 @@ import {
   joinLines,
   type ChecklistItem,
 } from "../lib/markdown.js";
-import { loadState, saveState } from "../lib/state.js";
+import { loadState, saveState, type PendingConfirmation } from "../lib/state.js";
 import type { Commit } from "../lib/git.js";
 
 export const prepareMeetingTool: Tool = {
@@ -56,70 +56,109 @@ function extractEnglishWords(text: string): string[] {
   return text.toLowerCase().match(/[a-z]{4,}/g) ?? [];
 }
 
+type MatchConfidence = "high" | "partial" | "none";
+
 /**
- * 체크리스트 항목 텍스트가 커밋(subject + body)에 매칭되는지 판단.
- * 우선순위: UE 클래스명 → 한국어 키워드 → 영문 키워드
+ * 체크리스트 항목 텍스트가 커밋(subject + body)에 얼마나 매칭되는지 반환.
+ * - high  : 자동완료 (UE 클래스명 일치 또는 키워드 70%↑)
+ * - partial: 사용자 확인 필요 (키워드 40~69%)
+ * - none  : 무관
  */
-function matchesCommit(itemText: string, commit: Commit): boolean {
+function commitMatchConfidence(itemText: string, commit: Commit): MatchConfidence {
   const searchText = [
     commit.subject,
     commit.body ?? "",
   ].join(" ").toLowerCase();
 
-  // 1. UE 클래스명 매칭 (하나라도 일치하면 OK)
+  // 1. UE 클래스명 매칭 → high
   const ueNames = extractUENames(itemText);
-  if (ueNames.length > 0) {
-    return ueNames.some(n => searchText.includes(n));
+  if (ueNames.length > 0 && ueNames.some(n => searchText.includes(n))) {
+    return "high";
   }
 
-  // 2. 한국어 키워드 매칭 (60% 이상 일치)
+  // 2. 한국어 키워드 매칭
   const koWords = extractKoreanWords(itemText);
   if (koWords.length >= 2) {
     const matched = koWords.filter(w => searchText.includes(w)).length;
-    return matched >= Math.ceil(koWords.length * 0.6);
+    const ratio = matched / koWords.length;
+    if (ratio >= 0.7) return "high";
+    if (ratio >= 0.4 && matched >= 1) return "partial";
+    return "none";
   }
 
-  // 3. 영문 키워드 매칭 (60% 이상 일치)
+  // 3. 영문 키워드 매칭
   const enWords = extractEnglishWords(itemText);
   if (enWords.length >= 2) {
     const matched = enWords.filter(w => searchText.includes(w)).length;
-    return matched >= Math.ceil(enWords.length * 0.6);
+    const ratio = matched / enWords.length;
+    if (ratio >= 0.7) return "high";
+    if (ratio >= 0.4 && matched >= 1) return "partial";
   }
 
-  return false;
+  return "none";
+}
+
+/** 하위 호환: 고신뢰 매칭 여부만 반환 */
+function matchesCommit(itemText: string, commit: Commit): boolean {
+  return commitMatchConfidence(itemText, commit) === "high";
+}
+
+interface AutoCompleteResult {
+  completed: ChecklistItem[];
+  pending: PendingConfirmation[];
 }
 
 /**
  * 커밋 목록을 체크리스트 항목과 매칭해 자동완료 처리.
- * @returns 자동완료된 항목 목록
+ * - 고신뢰 매칭 → 즉시 [x] 처리
+ * - 부분 매칭 → 사용자 확인 대기 목록에 추가
  */
 async function autoCompleteFromCommits(
   commits: Commit[],
-): Promise<ChecklistItem[]> {
-  if (commits.length === 0) return [];
-  if (!(await gameFileExists(GAME_FILES.checklist))) return [];
+): Promise<AutoCompleteResult> {
+  if (commits.length === 0) return { completed: [], pending: [] };
+  if (!(await gameFileExists(GAME_FILES.checklist))) return { completed: [], pending: [] };
 
   const raw = await readGameFile(GAME_FILES.checklist);
   const { items, lines } = parseChecklist(raw);
   const incomplete = items.filter(i => !i.done);
-  if (incomplete.length === 0) return [];
+  if (incomplete.length === 0) return { completed: [], pending: [] };
 
-  const matched: ChecklistItem[] = [];
+  const completed: ChecklistItem[] = [];
+  const pending: PendingConfirmation[] = [];
   let updatedLines = lines;
+  let pendingIndex = 1;
 
   for (const item of incomplete) {
-    const isMatched = commits.some(c => matchesCommit(item.text, c));
-    if (isMatched) {
-      matched.push(item);
+    let bestConfidence: MatchConfidence = "none";
+    let bestCommit: Commit | undefined;
+
+    for (const c of commits) {
+      const conf = commitMatchConfidence(item.text, c);
+      if (conf === "high") { bestConfidence = "high"; bestCommit = c; break; }
+      if (conf === "partial" && bestConfidence === "none") {
+        bestConfidence = "partial";
+        bestCommit = c;
+      }
+    }
+
+    if (bestConfidence === "high") {
+      completed.push(item);
       updatedLines = setItemDone(updatedLines, item, true);
+    } else if (bestConfidence === "partial" && bestCommit) {
+      pending.push({
+        index: pendingIndex++,
+        itemText: item.text,
+        commitSubject: bestCommit.subject,
+      });
     }
   }
 
-  if (matched.length > 0) {
+  if (completed.length > 0) {
     await writeGameFile(GAME_FILES.checklist, joinLines(updatedLines), { overwrite: true });
   }
 
-  return matched;
+  return { completed, pending };
 }
 
 export async function prepareMeeting(raw: unknown) {
@@ -149,7 +188,7 @@ export async function prepareMeeting(raw: unknown) {
   );
 
   // 커밋 기반 체크리스트 자동완료
-  const autoCompleted = await autoCompleteFromCommits(commits);
+  const { completed: autoCompleted, pending: pendingConfirmations } = await autoCompleteFromCommits(commits);
 
   let progressLine = "(체크리스트 없음)";
   if (await gameFileExists(GAME_FILES.checklist)) {
@@ -172,6 +211,18 @@ export async function prepareMeeting(raw: unknown) {
         "",
         "### ✅ 자동 완료 처리",
         autoCompleted.map(i => `- [x] ${i.text}`).join("\n"),
+      ].join("\n")
+    : "";
+
+  // 확인 요청 블록
+  const confirmBlock = pendingConfirmations.length > 0
+    ? [
+        "",
+        "### ❓ 확인 필요",
+        "아래 항목이 이번 커밋으로 완료됐나요? 맞으면 댓글에 번호를 입력해주세요 (예: `1 2`).",
+        pendingConfirmations
+          .map(p => `${p.index}. **${p.itemText}** ← \`${p.commitSubject}\``)
+          .join("\n"),
       ].join("\n")
     : "";
 
@@ -212,6 +263,7 @@ export async function prepareMeeting(raw: unknown) {
     "### 최근 커밋",
     commitsBlock,
     autoCompleteBlock,
+    confirmBlock,
     "",
     "### 진행 상황",
     progressLine,
@@ -236,6 +288,7 @@ export async function prepareMeeting(raw: unknown) {
   const now = new Date().toISOString();
   state.lastPrepareMeetingAt = now;
   state.currentMeetingThreadId = thread.id;
+  state.pendingConfirmations = pendingConfirmations;
   await saveState(state);
 
   return {
@@ -249,6 +302,7 @@ export async function prepareMeeting(raw: unknown) {
           `  태그: [${config.discord.tagInProgress}]\n` +
           `  추가 메시지: ${followupMessageIds.length}건\n` +
           `  자동완료 항목: ${autoCompleted.length > 0 ? autoCompleted.map(i => i.text).join(", ") : "없음"}\n` +
+          `  확인 대기 항목: ${pendingConfirmations.length > 0 ? pendingConfirmations.map(p => `${p.index}. ${p.itemText}`).join(", ") : "없음"}\n` +
           `  타임스탬프 갱신: ${now}\n\n` +
           `이제 스크럼은 위 스레드의 댓글로 진행하세요. ` +
           `회의가 끝나면 finish_meeting을 호출하면 됩니다.`,
