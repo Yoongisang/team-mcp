@@ -19,9 +19,9 @@ export const prepareMeetingTool: Tool = {
   description:
     "마지막 prepare_meeting 이후의 git 커밋과 체크리스트 진행률을 모아 " +
     "Discord 포럼 채널에 [진행] 태그로 새 회의 스레드를 생성한다. " +
-    "이후 스크럼은 이 스레드의 댓글로 진행되며, finish_meeting 호출 시 " +
-    "댓글들을 수집해 Notion·Jira에 정리한다. 전송 후 타임스탬프와 " +
-    "thread ID를 state에 저장해 다음 호출 시 중복 보고를 방지한다.",
+    "커밋과 체크리스트 항목이 부분적으로 일치하면 Discord 포스트 전에 " +
+    "사용자에게 확인을 요청한다. confirmed_indexes를 포함해 재호출하면 " +
+    "확인 결과를 체크리스트에 반영하고 Discord에 포스트한다.",
   inputSchema: {
     type: "object",
     properties: {
@@ -31,13 +31,24 @@ export const prepareMeetingTool: Tool = {
           "스크럼 보고자 이름 (git --author 매칭에 사용). " +
           "Discord 메시지로 트리거된 경우 메시지 작성자의 표시 이름을 그대로 전달.",
       },
+      confirmed_indexes: {
+        type: "array",
+        items: { type: "number" },
+        description:
+          "확인 질문에 대한 응답. 완료된 항목의 번호 배열. " +
+          "없으면 첫 번째 호출로 간주해 부분 매칭 항목이 있을 경우 질문을 반환한다. " +
+          "빈 배열([])은 '모두 아님'으로 처리해 Discord 포스트를 진행한다.",
+      },
     },
     required: ["user_name"],
     additionalProperties: false,
   },
 };
 
-const Args = z.object({ user_name: z.string().min(1) });
+const Args = z.object({
+  user_name: z.string().min(1),
+  confirmed_indexes: z.array(z.number()).optional(),
+});
 
 // ── 체크리스트 자동완료 ────────────────────────────────────────────────────
 
@@ -162,7 +173,7 @@ async function autoCompleteFromCommits(
 }
 
 export async function prepareMeeting(raw: unknown) {
-  const { user_name } = Args.parse(raw);
+  const { user_name, confirmed_indexes } = Args.parse(raw);
   const token = requireConfig(config.discord.botToken, "DISCORD_BOT_TOKEN");
   const forumId = requireConfig(
     config.discord.scrumChannelId,
@@ -172,8 +183,8 @@ export async function prepareMeeting(raw: unknown) {
   const state = await loadState();
   const since = state.lastPrepareMeetingAt;
 
+  // ── git 커밋 수집 ────────────────────────────────────────────────────
   const baseCommits = await gitLog({ author: user_name, since, limit: 50 });
-  // 상세 정보는 최대 10개만 (스레드 길이 제한 고려)
   const detailLimit = 10;
   const commits = await Promise.all(
     baseCommits.map(async (c, i) => {
@@ -187,12 +198,49 @@ export async function prepareMeeting(raw: unknown) {
     }),
   );
 
-  // 커밋 기반 체크리스트 자동완료
-  const { completed: autoCompleted, pending: pendingConfirmations } = await autoCompleteFromCommits(commits);
+  // ── 2차 호출: confirmed_indexes로 pending 확인 처리 ──────────────────
+  if (confirmed_indexes !== undefined) {
+    const pending = state.pendingConfirmations ?? [];
+    if (pending.length > 0 && confirmed_indexes.length > 0) {
+      const raw_ckl = await readGameFile(GAME_FILES.checklist);
+      const { items, lines } = parseChecklist(raw_ckl);
+      let updatedLines = lines;
+      for (const p of pending) {
+        if (!confirmed_indexes.includes(p.index)) continue;
+        const target = items.find(i => !i.done && i.text === p.itemText);
+        if (target) updatedLines = setItemDone(updatedLines, target, true);
+      }
+      await writeGameFile(GAME_FILES.checklist, joinLines(updatedLines), { overwrite: true });
+    }
+    state.pendingConfirmations = [];
+    await saveState(state);
+  }
 
+  // ── 체크리스트 자동완료 (고신뢰) + 부분 매칭 탐지 ───────────────────
+  const { completed: autoCompleted, pending: newPending } = await autoCompleteFromCommits(commits);
+
+  // ── 1차 호출이고 부분 매칭 항목이 있으면 → Discord 포스트 전에 질문 반환
+  if (confirmed_indexes === undefined && newPending.length > 0) {
+    state.pendingConfirmations = newPending;
+    await saveState(state);
+
+    const lines = [
+      "다음 항목들이 이번 커밋으로 완료된 작업과 같은가요?\n",
+      ...newPending.map(p =>
+        `**${p.index}.** ${p.itemText}\n   ← \`${p.commitSubject}\``
+      ),
+      "\n완료된 항목 번호를 `confirmed_indexes`에 담아 다시 호출해주세요.",
+      "없으면 빈 배열 `[]`로 호출하면 Discord 포스트로 진행합니다.",
+    ];
+
+    return {
+      content: [{ type: "text" as const, text: lines.join("\n") }],
+    };
+  }
+
+  // ── 진행률 계산 ──────────────────────────────────────────────────────
   let progressLine = "(체크리스트 없음)";
   if (await gameFileExists(GAME_FILES.checklist)) {
-    // 자동완료 후 최신 상태로 다시 읽기
     const ckl = await readGameFile(GAME_FILES.checklist);
     const { items } = parseChecklist(ckl);
     const p = progress(items);
@@ -205,56 +253,33 @@ export async function prepareMeeting(raw: unknown) {
     }
   }
 
-  // 자동완료 블록
-  const autoCompleteBlock = autoCompleted.length > 0
-    ? [
-        "",
-        "### ✅ 자동 완료 처리",
-        autoCompleted.map(i => `- [x] ${i.text}`).join("\n"),
-      ].join("\n")
-    : "";
-
-  // 확인 요청 블록
-  const confirmBlock = pendingConfirmations.length > 0
-    ? [
-        "",
-        "### ❓ 확인 필요",
-        "아래 항목이 이번 커밋으로 완료됐나요? 맞으면 댓글에 번호를 입력해주세요 (예: `1 2`).",
-        pendingConfirmations
-          .map(p => `${p.index}. **${p.itemText}** ← \`${p.commitSubject}\``)
-          .join("\n"),
-      ].join("\n")
-    : "";
-
+  // ── Discord 보고 메시지 빌드 ─────────────────────────────────────────
   const periodLabel = since
     ? `${since.slice(0, 19).replace("T", " ")} ~ 지금`
     : "최근 7일";
 
   const commitsBlock = commits.length === 0
     ? "(없음)"
-    : commits
-        .map((c) => {
-          const lines: string[] = [`- \`${c.hash.slice(0, 7)}\` ${c.subject}`];
-          if (c.filesChanged !== undefined && c.filesChanged > 0) {
-            const stat = `${c.filesChanged} files, +${c.insertions ?? 0}/-${c.deletions ?? 0}`;
-            lines.push(`  - 변경: ${stat}`);
-          }
-          if (c.topFiles && c.topFiles.length > 0) {
-            const more = (c.filesChanged ?? 0) > c.topFiles.length
-              ? ` 외 ${(c.filesChanged ?? 0) - c.topFiles.length}개`
-              : "";
-            lines.push(`  - 파일: ${c.topFiles.join(", ")}${more}`);
-          }
-          if (c.body) {
-            // body 첫 3줄만 (너무 길면 자름)
-            const bodyLines = c.body.split("\n").map(s => s.trim()).filter(Boolean).slice(0, 3);
-            for (const bl of bodyLines) {
-              lines.push(`  - ${bl.length > 120 ? bl.slice(0, 117) + "..." : bl}`);
-            }
-          }
-          return lines.join("\n");
-        })
-        .join("\n");
+    : commits.map((c) => {
+        const ls: string[] = [`- \`${c.hash.slice(0, 7)}\` ${c.subject}`];
+        if (c.filesChanged !== undefined && c.filesChanged > 0) {
+          ls.push(`  - 변경: ${c.filesChanged} files, +${c.insertions ?? 0}/-${c.deletions ?? 0}`);
+        }
+        if (c.topFiles && c.topFiles.length > 0) {
+          const more = (c.filesChanged ?? 0) > c.topFiles.length
+            ? ` 외 ${(c.filesChanged ?? 0) - c.topFiles.length}개` : "";
+          ls.push(`  - 파일: ${c.topFiles.join(", ")}${more}`);
+        }
+        if (c.body) {
+          const bodyLines = c.body.split("\n").map(s => s.trim()).filter(Boolean).slice(0, 3);
+          for (const bl of bodyLines) ls.push(`  - ${bl.length > 120 ? bl.slice(0, 117) + "..." : bl}`);
+        }
+        return ls.join("\n");
+      }).join("\n");
+
+  const autoCompleteBlock = autoCompleted.length > 0
+    ? ["", "### ✅ 자동 완료 처리", autoCompleted.map(i => `- [x] ${i.text}`).join("\n")].join("\n")
+    : "";
 
   const report = [
     `## ${user_name} 스크럼 보고`,
@@ -263,64 +288,48 @@ export async function prepareMeeting(raw: unknown) {
     "### 최근 커밋",
     commitsBlock,
     autoCompleteBlock,
-    confirmBlock,
     "",
     "### 진행 상황",
     progressLine,
   ].join("\n");
 
+  // ── Discord 포스트 (스레드 재사용 or 신규 생성) ───────────────────────
   const client = new DiscordClient(token);
   const today = new Date().toISOString().slice(0, 10);
-
-  // ── 스레드 재사용 vs 신규 생성 ────────────────────────────────────────
-  // currentMeetingThreadId가 있으면 기존 스레드에 추가 포스트 (다중 사용자 지원)
   let threadId: string;
   let isNewThread: boolean;
   let followupCount = 0;
 
   if (state.currentMeetingThreadId) {
-    // 기존 회의 스레드에 개인 보고를 추가 메시지로 포스트
     threadId = state.currentMeetingThreadId;
     isNewThread = false;
     const msgIds = await client.postChunked(threadId, report);
     followupCount = msgIds.length;
   } else {
-    // 오늘의 첫 prepare_meeting → 새 스레드 생성
     const forum = await client.getChannel(forumId);
-    const [inProgressTagId] = resolveForumTagIds(forum, [
-      config.discord.tagInProgress,
-    ]);
-    const threadName = `스크럼 회의 ${today}`;
+    const [inProgressTagId] = resolveForumTagIds(forum, [config.discord.tagInProgress]);
     const { thread, followupMessageIds } = await client.createForumThread(
-      forumId,
-      threadName,
-      report,
-      [inProgressTagId!],
+      forumId, `스크럼 회의 ${today}`, report, [inProgressTagId!],
     );
     threadId = thread.id;
     isNewThread = true;
     followupCount = followupMessageIds.length;
   }
 
-  // lastPrepareMeetingAt은 finish_meeting에서만 갱신 (다중 사용자 타임스탬프 오염 방지)
   state.currentMeetingThreadId = threadId;
-  state.pendingConfirmations = pendingConfirmations;
+  state.pendingConfirmations = [];
   await saveState(state);
 
   return {
-    content: [
-      {
-        type: "text" as const,
-        text:
-          `${isNewThread ? "포럼 회의 스레드 생성 완료" : "기존 회의 스레드에 보고 추가 완료"}\n` +
-          `  포럼: ${forumId}\n` +
-          `  스레드: ${threadId}\n` +
-          `  ${isNewThread ? `태그: [${config.discord.tagInProgress}]\n  ` : ""}추가 메시지: ${followupCount}건\n` +
-          `  자동완료 항목: ${autoCompleted.length > 0 ? autoCompleted.map(i => i.text).join(", ") : "없음"}\n` +
-          `  확인 대기 항목: ${pendingConfirmations.length > 0 ? pendingConfirmations.map(p => `${p.index}. ${p.itemText}`).join(", ") : "없음"}\n\n` +
-          `이제 스크럼은 위 스레드의 댓글로 진행하세요. ` +
-          `회의가 끝나면 finish_meeting을 호출하면 됩니다.`,
-      },
-    ],
+    content: [{
+      type: "text" as const,
+      text:
+        `${isNewThread ? "포럼 회의 스레드 생성 완료" : "기존 회의 스레드에 보고 추가 완료"}\n` +
+        `  포럼: ${forumId}\n` +
+        `  스레드: ${threadId}\n` +
+        `  ${isNewThread ? `태그: [${config.discord.tagInProgress}]\n  ` : ""}추가 메시지: ${followupCount}건\n` +
+        `  자동완료: ${autoCompleted.length > 0 ? autoCompleted.map(i => i.text).join(", ") : "없음"}\n\n` +
+        `이제 스크럼은 위 스레드의 댓글로 진행하세요. 회의가 끝나면 finish_meeting을 호출하면 됩니다.`,
+    }],
   };
 }
