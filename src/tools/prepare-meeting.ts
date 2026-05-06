@@ -270,24 +270,40 @@ export async function prepareMeeting(raw: unknown) {
   ].join("\n");
 
   const client = new DiscordClient(token);
-  const forum = await client.getChannel(forumId);
-  const [inProgressTagId] = resolveForumTagIds(forum, [
-    config.discord.tagInProgress,
-  ]);
-
   const today = new Date().toISOString().slice(0, 10);
-  const threadName = `스크럼 회의 ${today}`;
 
-  const { thread, followupMessageIds } = await client.createForumThread(
-    forumId,
-    threadName,
-    report,
-    [inProgressTagId!],
-  );
+  // ── 스레드 재사용 vs 신규 생성 ────────────────────────────────────────
+  // currentMeetingThreadId가 있으면 기존 스레드에 추가 포스트 (다중 사용자 지원)
+  let threadId: string;
+  let isNewThread: boolean;
+  let followupCount = 0;
 
-  const now = new Date().toISOString();
-  state.lastPrepareMeetingAt = now;
-  state.currentMeetingThreadId = thread.id;
+  if (state.currentMeetingThreadId) {
+    // 기존 회의 스레드에 개인 보고를 추가 메시지로 포스트
+    threadId = state.currentMeetingThreadId;
+    isNewThread = false;
+    const msgIds = await client.postChunked(threadId, report);
+    followupCount = msgIds.length;
+  } else {
+    // 오늘의 첫 prepare_meeting → 새 스레드 생성
+    const forum = await client.getChannel(forumId);
+    const [inProgressTagId] = resolveForumTagIds(forum, [
+      config.discord.tagInProgress,
+    ]);
+    const threadName = `스크럼 회의 ${today}`;
+    const { thread, followupMessageIds } = await client.createForumThread(
+      forumId,
+      threadName,
+      report,
+      [inProgressTagId!],
+    );
+    threadId = thread.id;
+    isNewThread = true;
+    followupCount = followupMessageIds.length;
+  }
+
+  // lastPrepareMeetingAt은 finish_meeting에서만 갱신 (다중 사용자 타임스탬프 오염 방지)
+  state.currentMeetingThreadId = threadId;
   state.pendingConfirmations = pendingConfirmations;
   await saveState(state);
 
@@ -296,14 +312,12 @@ export async function prepareMeeting(raw: unknown) {
       {
         type: "text" as const,
         text:
-          `포럼 회의 스레드 생성 완료\n` +
+          `${isNewThread ? "포럼 회의 스레드 생성 완료" : "기존 회의 스레드에 보고 추가 완료"}\n` +
           `  포럼: ${forumId}\n` +
-          `  스레드: ${thread.id} (${thread.name})\n` +
-          `  태그: [${config.discord.tagInProgress}]\n` +
-          `  추가 메시지: ${followupMessageIds.length}건\n` +
+          `  스레드: ${threadId}\n` +
+          `  ${isNewThread ? `태그: [${config.discord.tagInProgress}]\n  ` : ""}추가 메시지: ${followupCount}건\n` +
           `  자동완료 항목: ${autoCompleted.length > 0 ? autoCompleted.map(i => i.text).join(", ") : "없음"}\n` +
-          `  확인 대기 항목: ${pendingConfirmations.length > 0 ? pendingConfirmations.map(p => `${p.index}. ${p.itemText}`).join(", ") : "없음"}\n` +
-          `  타임스탬프 갱신: ${now}\n\n` +
+          `  확인 대기 항목: ${pendingConfirmations.length > 0 ? pendingConfirmations.map(p => `${p.index}. ${p.itemText}`).join(", ") : "없음"}\n\n` +
           `이제 스크럼은 위 스레드의 댓글로 진행하세요. ` +
           `회의가 끝나면 finish_meeting을 호출하면 됩니다.`,
       },

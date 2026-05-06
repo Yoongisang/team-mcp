@@ -336,7 +336,8 @@ export async function finishMeeting(raw: unknown) {
       [summaryTagId!],
     );
 
-    // state 클리어
+    // state 클리어 + 다음 prepare_meeting의 since 기준 갱신
+    state.lastPrepareMeetingAt = new Date().toISOString();
     state.currentMeetingThreadId = null;
     state.pendingConfirmations = [];
     await saveState(state);
