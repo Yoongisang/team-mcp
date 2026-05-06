@@ -3,7 +3,7 @@ import { z } from "zod";
 import { config, requireConfig } from "../config.js";
 import { DiscordClient, resolveForumTagIds } from "../lib/discord.js";
 import { GAME_FILES, gameFileExists, readGameFile } from "../lib/files.js";
-import { gitLog } from "../lib/git.js";
+import { gitLog, gitShowDetails } from "../lib/git.js";
 import { parseChecklist, progress } from "../lib/markdown.js";
 import { loadState, saveState } from "../lib/state.js";
 
@@ -43,7 +43,20 @@ export async function prepareMeeting(raw: unknown) {
   const state = await loadState();
   const since = state.lastPrepareMeetingAt;
 
-  const commits = await gitLog({ author: user_name, since, limit: 50 });
+  const baseCommits = await gitLog({ author: user_name, since, limit: 50 });
+  // 상세 정보는 최대 10개만 (스레드 길이 제한 고려)
+  const detailLimit = 10;
+  const commits = await Promise.all(
+    baseCommits.map(async (c, i) => {
+      if (i >= detailLimit) return c;
+      try {
+        const d = await gitShowDetails(c.hash);
+        return { ...c, ...d };
+      } catch {
+        return c;
+      }
+    }),
+  );
 
   let progressLine = "(체크리스트 없음)";
   if (await gameFileExists(GAME_FILES.checklist)) {
@@ -66,7 +79,27 @@ export async function prepareMeeting(raw: unknown) {
   const commitsBlock = commits.length === 0
     ? "(없음)"
     : commits
-        .map((c) => `- \`${c.hash.slice(0, 7)}\` ${c.subject}`)
+        .map((c) => {
+          const lines: string[] = [`- \`${c.hash.slice(0, 7)}\` ${c.subject}`];
+          if (c.filesChanged !== undefined && c.filesChanged > 0) {
+            const stat = `${c.filesChanged} files, +${c.insertions ?? 0}/-${c.deletions ?? 0}`;
+            lines.push(`  - 변경: ${stat}`);
+          }
+          if (c.topFiles && c.topFiles.length > 0) {
+            const more = (c.filesChanged ?? 0) > c.topFiles.length
+              ? ` 외 ${(c.filesChanged ?? 0) - c.topFiles.length}개`
+              : "";
+            lines.push(`  - 파일: ${c.topFiles.join(", ")}${more}`);
+          }
+          if (c.body) {
+            // body 첫 3줄만 (너무 길면 자름)
+            const bodyLines = c.body.split("\n").map(s => s.trim()).filter(Boolean).slice(0, 3);
+            for (const bl of bodyLines) {
+              lines.push(`  - ${bl.length > 120 ? bl.slice(0, 117) + "..." : bl}`);
+            }
+          }
+          return lines.join("\n");
+        })
         .join("\n");
 
   const report = [
