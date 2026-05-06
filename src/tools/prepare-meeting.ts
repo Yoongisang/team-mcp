@@ -2,10 +2,17 @@ import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { config, requireConfig } from "../config.js";
 import { DiscordClient, resolveForumTagIds } from "../lib/discord.js";
-import { GAME_FILES, gameFileExists, readGameFile } from "../lib/files.js";
+import { GAME_FILES, gameFileExists, readGameFile, writeGameFile } from "../lib/files.js";
 import { gitLog, gitShowDetails } from "../lib/git.js";
-import { parseChecklist, progress } from "../lib/markdown.js";
+import {
+  parseChecklist,
+  progress,
+  setItemDone,
+  joinLines,
+  type ChecklistItem,
+} from "../lib/markdown.js";
 import { loadState, saveState } from "../lib/state.js";
+import type { Commit } from "../lib/git.js";
 
 export const prepareMeetingTool: Tool = {
   name: "prepare_meeting",
@@ -31,6 +38,89 @@ export const prepareMeetingTool: Tool = {
 };
 
 const Args = z.object({ user_name: z.string().min(1) });
+
+// ── 체크리스트 자동완료 ────────────────────────────────────────────────────
+
+/** UE 클래스/에셋명 추출 (GA_, GE_, GC_, AT_, BP_ 등) */
+function extractUENames(text: string): string[] {
+  return (text.match(/\b[A-Z]{1,4}_[A-Za-z0-9_]+/g) ?? []).map(s => s.toLowerCase());
+}
+
+/** 한국어 2자 이상 단어 추출 */
+function extractKoreanWords(text: string): string[] {
+  return text.match(/[가-힣]{2,}/g) ?? [];
+}
+
+/** 영문 4자 이상 단어 추출 */
+function extractEnglishWords(text: string): string[] {
+  return text.toLowerCase().match(/[a-z]{4,}/g) ?? [];
+}
+
+/**
+ * 체크리스트 항목 텍스트가 커밋(subject + body)에 매칭되는지 판단.
+ * 우선순위: UE 클래스명 → 한국어 키워드 → 영문 키워드
+ */
+function matchesCommit(itemText: string, commit: Commit): boolean {
+  const searchText = [
+    commit.subject,
+    commit.body ?? "",
+  ].join(" ").toLowerCase();
+
+  // 1. UE 클래스명 매칭 (하나라도 일치하면 OK)
+  const ueNames = extractUENames(itemText);
+  if (ueNames.length > 0) {
+    return ueNames.some(n => searchText.includes(n));
+  }
+
+  // 2. 한국어 키워드 매칭 (60% 이상 일치)
+  const koWords = extractKoreanWords(itemText);
+  if (koWords.length >= 2) {
+    const matched = koWords.filter(w => searchText.includes(w)).length;
+    return matched >= Math.ceil(koWords.length * 0.6);
+  }
+
+  // 3. 영문 키워드 매칭 (60% 이상 일치)
+  const enWords = extractEnglishWords(itemText);
+  if (enWords.length >= 2) {
+    const matched = enWords.filter(w => searchText.includes(w)).length;
+    return matched >= Math.ceil(enWords.length * 0.6);
+  }
+
+  return false;
+}
+
+/**
+ * 커밋 목록을 체크리스트 항목과 매칭해 자동완료 처리.
+ * @returns 자동완료된 항목 목록
+ */
+async function autoCompleteFromCommits(
+  commits: Commit[],
+): Promise<ChecklistItem[]> {
+  if (commits.length === 0) return [];
+  if (!(await gameFileExists(GAME_FILES.checklist))) return [];
+
+  const raw = await readGameFile(GAME_FILES.checklist);
+  const { items, lines } = parseChecklist(raw);
+  const incomplete = items.filter(i => !i.done);
+  if (incomplete.length === 0) return [];
+
+  const matched: ChecklistItem[] = [];
+  let updatedLines = lines;
+
+  for (const item of incomplete) {
+    const isMatched = commits.some(c => matchesCommit(item.text, c));
+    if (isMatched) {
+      matched.push(item);
+      updatedLines = setItemDone(updatedLines, item, true);
+    }
+  }
+
+  if (matched.length > 0) {
+    await writeGameFile(GAME_FILES.checklist, joinLines(updatedLines), { overwrite: true });
+  }
+
+  return matched;
+}
 
 export async function prepareMeeting(raw: unknown) {
   const { user_name } = Args.parse(raw);
@@ -58,8 +148,12 @@ export async function prepareMeeting(raw: unknown) {
     }),
   );
 
+  // 커밋 기반 체크리스트 자동완료
+  const autoCompleted = await autoCompleteFromCommits(commits);
+
   let progressLine = "(체크리스트 없음)";
   if (await gameFileExists(GAME_FILES.checklist)) {
+    // 자동완료 후 최신 상태로 다시 읽기
     const ckl = await readGameFile(GAME_FILES.checklist);
     const { items } = parseChecklist(ckl);
     const p = progress(items);
@@ -71,6 +165,15 @@ export async function prepareMeeting(raw: unknown) {
       progressLine += `\n미완료: ${head}${more > 0 ? ` 외 ${more}개` : ""}`;
     }
   }
+
+  // 자동완료 블록
+  const autoCompleteBlock = autoCompleted.length > 0
+    ? [
+        "",
+        "### ✅ 자동 완료 처리",
+        autoCompleted.map(i => `- [x] ${i.text}`).join("\n"),
+      ].join("\n")
+    : "";
 
   const periodLabel = since
     ? `${since.slice(0, 19).replace("T", " ")} ~ 지금`
@@ -108,6 +211,7 @@ export async function prepareMeeting(raw: unknown) {
     "",
     "### 최근 커밋",
     commitsBlock,
+    autoCompleteBlock,
     "",
     "### 진행 상황",
     progressLine,
@@ -144,6 +248,7 @@ export async function prepareMeeting(raw: unknown) {
           `  스레드: ${thread.id} (${thread.name})\n` +
           `  태그: [${config.discord.tagInProgress}]\n` +
           `  추가 메시지: ${followupMessageIds.length}건\n` +
+          `  자동완료 항목: ${autoCompleted.length > 0 ? autoCompleted.map(i => i.text).join(", ") : "없음"}\n` +
           `  타임스탬프 갱신: ${now}\n\n` +
           `이제 스크럼은 위 스레드의 댓글로 진행하세요. ` +
           `회의가 끝나면 finish_meeting을 호출하면 됩니다.`,
