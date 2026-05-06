@@ -1,5 +1,11 @@
 import { config as dotenvConfig } from "dotenv";
-dotenvConfig({ override: true });
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+// dist/config.js 기준 상위 디렉토리(team-mcp 루트)의 .env
+dotenvConfig({ path: resolve(__dirname, "../.env"), override: true });
 
 const env = (key: string): string => process.env[key] ?? "";
 
