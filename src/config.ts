@@ -1,4 +1,5 @@
-import "dotenv/config";
+import { config as dotenvConfig } from "dotenv";
+dotenvConfig({ override: true });
 
 const env = (key: string): string => process.env[key] ?? "";
 
