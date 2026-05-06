@@ -200,15 +200,18 @@ export async function finishMeeting(raw: unknown) {
       return undefined;
     }
 
-    // ── 액션 아이템별 Jira Task 생성 (백로그) ──
+    // ── 액션 아이템별 Jira Task 생성 (백로그, 시작일=오늘 / 기한=파싱된 마감일) ──
     const actionIssues: CreatedIssue[] = [];
     for (const item of args.action_items) {
+      const deadline = parseDateFromItem(item);
       const issue = await jira.createIssue({
         projectKey: jiraProject,
         summary: item,
         description: `회의록 참조: ${notionPage.url}`,
         issueType: config.jira.taskType,
         labels: ["scrum-action-item"],
+        startDate: today,
+        dueDate: deadline,
       });
       actionIssues.push(issue);
     }
@@ -222,12 +225,20 @@ export async function finishMeeting(raw: unknown) {
       `Notion: ${notionPage.url}`,
     ].join("\n");
 
+    const latestDeadline = args.action_items
+      .map(parseDateFromItem)
+      .filter((d): d is string => !!d)
+      .sort()
+      .at(-1);
+
     const summaryIssue = await jira.createIssue({
       projectKey: jiraProject,
       summary: title,
       description: jiraDescription,
       issueType: config.jira.taskType,
       labels: ["scrum-meeting"],
+      startDate: today,
+      dueDate: latestDeadline,
     });
 
     const sprintInfo = "백로그에 생성됨 (무료 요금제 — 스프린트 배정은 Jira UI에서)";

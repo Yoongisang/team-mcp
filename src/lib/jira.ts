@@ -72,6 +72,10 @@ export class JiraClient {
     issueType?: string;
     sprintId?: number | null;
     labels?: string[];
+    /** YYYY-MM-DD. Jira 표준 `duedate` 필드. */
+    dueDate?: string;
+    /** YYYY-MM-DD. customfield_10015 (Start date). */
+    startDate?: string;
   }): Promise<CreatedIssue> {
     const description = opts.description
       ? {
@@ -93,6 +97,8 @@ export class JiraClient {
     };
     if (description) fields.description = description;
     if (opts.labels?.length) fields.labels = opts.labels;
+    if (opts.dueDate) fields.duedate = opts.dueDate;
+    if (opts.startDate) fields.customfield_10015 = opts.startDate;
 
     const data = (await this.request("/rest/api/3/issue", {
       method: "POST",
