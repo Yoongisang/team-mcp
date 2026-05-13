@@ -9,6 +9,7 @@ import {
   progress,
   setItemDone,
   joinLines,
+  appendCheckedItems,
   type ChecklistItem,
 } from "../lib/markdown.js";
 import { loadState, saveState, type PendingConfirmation } from "../lib/state.js";
@@ -117,28 +118,45 @@ function matchesCommit(itemText: string, commit: Commit): boolean {
 interface AutoCompleteResult {
   completed: ChecklistItem[];
   pending: PendingConfirmation[];
+  /**
+   * 체크리스트의 어떤 항목과도 매칭되지 않은 커밋들 (none-매칭).
+   * 사용자 요청: 이 커밋들은 새 항목으로 추가 + 체크 처리 대상.
+   * 호출자가 confirmed_indexes 처리 후 별도로 추가 적용함.
+   */
+  orphanCommits: Commit[];
 }
 
 /**
  * 커밋 목록을 체크리스트 항목과 매칭해 자동완료 처리.
  * - 고신뢰 매칭 → 즉시 [x] 처리
  * - 부분 매칭 → 사용자 확인 대기 목록에 추가
+ * - 어떤 항목과도 매칭 안 됨(none) → orphanCommits 반환
  */
 async function autoCompleteFromCommits(
   commits: Commit[],
 ): Promise<AutoCompleteResult> {
-  if (commits.length === 0) return { completed: [], pending: [] };
-  if (!(await gameFileExists(GAME_FILES.checklist))) return { completed: [], pending: [] };
+  if (commits.length === 0)
+    return { completed: [], pending: [], orphanCommits: [] };
+  if (!(await gameFileExists(GAME_FILES.checklist)))
+    return { completed: [], pending: [], orphanCommits: [] };
 
   const raw = await readGameFile(GAME_FILES.checklist);
   const { items, lines } = parseChecklist(raw);
   const incomplete = items.filter(i => !i.done);
-  if (incomplete.length === 0) return { completed: [], pending: [] };
+
+  // 체크리스트에 미완료 항목이 없으면 모든 커밋이 orphan 후보
+  // (단, 진행률 측면에서는 이미 다 끝난 상태라 추가 의미는 없지만 사용자가 원하니 추가)
+  if (incomplete.length === 0) {
+    return { completed: [], pending: [], orphanCommits: [...commits] };
+  }
 
   const completed: ChecklistItem[] = [];
   const pending: PendingConfirmation[] = [];
   let updatedLines = lines;
   let pendingIndex = 1;
+
+  // 각 커밋이 어떤 항목과도 매칭(high/partial) 안 됐는지 추적
+  const matchedCommitHashes = new Set<string>();
 
   for (const item of incomplete) {
     let bestConfidence: MatchConfidence = "none";
@@ -146,6 +164,7 @@ async function autoCompleteFromCommits(
 
     for (const c of commits) {
       const conf = commitMatchConfidence(item.text, c);
+      if (conf !== "none") matchedCommitHashes.add(c.hash);
       if (conf === "high") { bestConfidence = "high"; bestCommit = c; break; }
       if (conf === "partial" && bestConfidence === "none") {
         bestConfidence = "partial";
@@ -169,7 +188,29 @@ async function autoCompleteFromCommits(
     await writeGameFile(GAME_FILES.checklist, joinLines(updatedLines), { overwrite: true });
   }
 
-  return { completed, pending };
+  // orphan: 어떤 항목과도 매칭(high/partial) 안 된 커밋
+  const orphanCommits = commits.filter(c => !matchedCommitHashes.has(c.hash));
+
+  return { completed, pending, orphanCommits };
+}
+
+/**
+ * orphan 커밋들의 subject를 체크리스트에 새 [x] 항목으로 추가.
+ * 마지막 체크된 항목 바로 다음에 삽입.
+ */
+async function appendOrphanCommitsToChecklist(
+  orphans: Commit[],
+): Promise<string[]> {
+  if (orphans.length === 0) return [];
+  if (!(await gameFileExists(GAME_FILES.checklist))) return [];
+
+  const raw = await readGameFile(GAME_FILES.checklist);
+  const parsed = parseChecklist(raw);
+  const texts = orphans.map(c => c.subject);
+  const { lines, insertedCount } = appendCheckedItems(parsed, texts);
+  if (insertedCount === 0) return [];
+  await writeGameFile(GAME_FILES.checklist, joinLines(lines), { overwrite: true });
+  return texts;
 }
 
 export async function prepareMeeting(raw: unknown) {
@@ -216,10 +257,15 @@ export async function prepareMeeting(raw: unknown) {
     await saveState(state);
   }
 
-  // ── 체크리스트 자동완료 (고신뢰) + 부분 매칭 탐지 ───────────────────
-  const { completed: autoCompleted, pending: newPending } = await autoCompleteFromCommits(commits);
+  // ── 체크리스트 자동완료 (고신뢰) + 부분 매칭 탐지 + orphan 식별 ──────
+  const {
+    completed: autoCompleted,
+    pending: newPending,
+    orphanCommits,
+  } = await autoCompleteFromCommits(commits);
 
   // ── 1차 호출이고 부분 매칭 항목이 있으면 → Discord 포스트 전에 질문 반환
+  //    (orphan 처리는 사용자 확인 후로 미룸 — 체크리스트 일관성 유지)
   if (confirmed_indexes === undefined && newPending.length > 0) {
     state.pendingConfirmations = newPending;
     await saveState(state);
@@ -237,6 +283,10 @@ export async function prepareMeeting(raw: unknown) {
       content: [{ type: "text" as const, text: lines.join("\n") }],
     };
   }
+
+  // ── orphan 커밋을 체크리스트에 새 [x] 항목으로 추가 ────────────────
+  // (1차 호출에서 partial 없는 경우 + 2차 호출 모두 여기 도달)
+  const addedItems = await appendOrphanCommitsToChecklist(orphanCommits);
 
   // ── 진행률 계산 ──────────────────────────────────────────────────────
   let progressLine = "(체크리스트 없음)";
@@ -281,6 +331,14 @@ export async function prepareMeeting(raw: unknown) {
     ? ["", "### ✅ 자동 완료 처리", autoCompleted.map(i => `- [x] ${i.text}`).join("\n")].join("\n")
     : "";
 
+  const addedBlock = addedItems.length > 0
+    ? [
+        "",
+        "### ➕ 체크리스트 신규 추가 (체크리스트에 없던 커밋 → 자동 추가 + 완료 처리)",
+        addedItems.map(t => `- [x] ${t}`).join("\n"),
+      ].join("\n")
+    : "";
+
   const report = [
     `## ${user_name} 스크럼 보고`,
     `_기간: ${periodLabel}_`,
@@ -288,6 +346,7 @@ export async function prepareMeeting(raw: unknown) {
     "### 최근 커밋",
     commitsBlock,
     autoCompleteBlock,
+    addedBlock,
     "",
     "### 진행 상황",
     progressLine,
@@ -328,7 +387,8 @@ export async function prepareMeeting(raw: unknown) {
         `  포럼: ${forumId}\n` +
         `  스레드: ${threadId}\n` +
         `  ${isNewThread ? `태그: [${config.discord.tagInProgress}]\n  ` : ""}추가 메시지: ${followupCount}건\n` +
-        `  자동완료: ${autoCompleted.length > 0 ? autoCompleted.map(i => i.text).join(", ") : "없음"}\n\n` +
+        `  자동완료: ${autoCompleted.length > 0 ? autoCompleted.map(i => i.text).join(", ") : "없음"}\n` +
+        `  신규 추가: ${addedItems.length > 0 ? addedItems.join(", ") : "없음"}\n\n` +
         `이제 스크럼은 위 스레드의 댓글로 진행하세요. 회의가 끝나면 finish_meeting을 호출하면 됩니다.`,
     }],
   };

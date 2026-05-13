@@ -13,20 +13,54 @@ export interface PendingConfirmation {
   commitSubject: string; // 매칭된 커밋 제목
 }
 
+export type BacklogProposalAction =
+  | "assign"
+  | "schedule"
+  | "move_to_sprint"
+  | "comment_only"
+  | "reopen";
+
+export interface BacklogProposal {
+  issueKey: string;
+  action: BacklogProposalAction;
+  assigneeName?: string;    // 표시 이름 (예: "김민수"). MCP가 accountId 조회
+  startDate?: string;       // YYYY-MM-DD
+  dueDate?: string;         // YYYY-MM-DD
+  sprintId?: number;
+  comment?: string;         // 회의 출처/맥락 노트
+}
+
+export interface PendingBacklogApproval {
+  /** Discord 정리 스레드 ID — 봇이 미리보기 메시지를 게시한 스레드. */
+  threadId: string;
+  /** 미리보기 메시지 ID — 이 메시지의 ✅ reaction을 검사. */
+  messageId: string;
+  /** 적용할 proposals 원본. */
+  proposals: BacklogProposal[];
+  /** ISO 타임스탬프. 24시간 후 자동 만료. */
+  createdAt: string;
+}
+
 export interface ScrumState {
   completions: Completion[];
   lastPrepareMeetingAt: string | null;
   /** 진행 중인 포럼 회의 스레드 ID. prepare_meeting이 설정, finish_meeting이 클리어. */
   currentMeetingThreadId: string | null;
+  /** 직전 회의 스레드 ID. finish_meeting이 클리어 직전 백업 → apply_meeting_to_backlog가 참조. */
+  lastFinishedMeetingThreadId: string | null;
   /** 사용자 확인 대기 중인 체크리스트 항목. finish_meeting에서 처리 후 클리어. */
   pendingConfirmations: PendingConfirmation[];
+  /** apply_meeting_to_backlog Phase 2에서 저장, Phase 3에서 확인 후 클리어. */
+  pendingBacklogApproval: PendingBacklogApproval | null;
 }
 
 const DEFAULT_STATE: ScrumState = {
   completions: [],
   lastPrepareMeetingAt: null,
   currentMeetingThreadId: null,
+  lastFinishedMeetingThreadId: null,
   pendingConfirmations: [],
+  pendingBacklogApproval: null,
 };
 
 export async function loadState(): Promise<ScrumState> {
@@ -40,7 +74,9 @@ export async function loadState(): Promise<ScrumState> {
       completions: Array.isArray(parsed.completions) ? parsed.completions : [],
       lastPrepareMeetingAt: parsed.lastPrepareMeetingAt ?? null,
       currentMeetingThreadId: parsed.currentMeetingThreadId ?? null,
+      lastFinishedMeetingThreadId: parsed.lastFinishedMeetingThreadId ?? null,
       pendingConfirmations: Array.isArray(parsed.pendingConfirmations) ? parsed.pendingConfirmations : [],
+      pendingBacklogApproval: parsed.pendingBacklogApproval ?? null,
     };
   } catch {
     return { ...DEFAULT_STATE, completions: [] };

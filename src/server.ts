@@ -16,6 +16,10 @@ import { changeDirectionTool, changeDirection } from "./tools/change-direction.j
 import { updatePlanTool, updatePlan } from "./tools/update-plan.js";
 import { prepareMeetingTool, prepareMeeting } from "./tools/prepare-meeting.js";
 import { finishMeetingTool, finishMeeting } from "./tools/finish-meeting.js";
+import {
+  applyMeetingToBacklogTool,
+  applyMeetingToBacklog,
+} from "./tools/apply-meeting-to-backlog.js";
 
 type ToolResult = {
   content: { type: "text"; text: string }[];
@@ -33,6 +37,10 @@ const handlers: Record<string, { tool: Tool; handler: Handler }> = {
   [updatePlanTool.name]: { tool: updatePlanTool, handler: updatePlan },
   [prepareMeetingTool.name]: { tool: prepareMeetingTool, handler: prepareMeeting },
   [finishMeetingTool.name]: { tool: finishMeetingTool, handler: finishMeeting },
+  [applyMeetingToBacklogTool.name]: {
+    tool: applyMeetingToBacklogTool,
+    handler: applyMeetingToBacklog,
+  },
 };
 
 const TOOLS: Tool[] = Object.values(handlers).map((h) => h.tool);

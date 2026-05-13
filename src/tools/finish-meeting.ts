@@ -63,6 +63,14 @@ export const finishMeetingTool: Tool = {
           "이번 회의에서 완료됐다고 언급된 작업명 목록. " +
           "Jira에서 유사한 이슈를 찾아 Done 처리.",
       },
+      create_action_issues: {
+        type: "boolean",
+        description:
+          "true이면 액션 아이템마다 새 Jira Task를 생성한다(레거시 동작). " +
+          "기본 false — 기존 백로그가 import된 환경에서는 apply_meeting_to_backlog로 " +
+          "기존 이슈를 업데이트하는 것을 권장하므로 중복 생성을 피한다. " +
+          "정말 신규 액션 아이템뿐이라 백로그 매칭이 불필요할 때만 true.",
+      },
     },
     required: ["invoker_id"],
     additionalProperties: false,
@@ -76,6 +84,7 @@ const Args = z.object({
   title: z.string().optional(),
   sprint_end_date: z.string().optional(),
   completed_task_names: z.array(z.string()).optional(),
+  create_action_issues: z.boolean().optional(),
 });
 
 function formatMessage(m: DiscordMessage): string {
@@ -246,20 +255,24 @@ export async function finishMeeting(raw: unknown) {
       return undefined;
     }
 
-    // ── 액션 아이템별 Jira Task 생성 (백로그, 시작일=오늘 / 기한=파싱된 마감일) ──
+    // ── 액션 아이템별 Jira Task 생성 (옵트인) ─────────────────────────
+    // 기본 false: 기존 백로그가 있는 환경에서 중복 생성을 피하기 위함.
+    // 백로그 매칭/업데이트는 apply_meeting_to_backlog 도구를 별도로 호출.
     const actionIssues: CreatedIssue[] = [];
-    for (const item of args.action_items) {
-      const deadline = parseDateFromItem(item);
-      const issue = await jira.createIssue({
-        projectKey: jiraProject,
-        summary: item,
-        description: `회의록 참조: ${notionPage.url}`,
-        issueType: config.jira.taskType,
-        labels: ["scrum-action-item"],
-        startDate: today,
-        dueDate: deadline,
-      });
-      actionIssues.push(issue);
+    if (args.create_action_issues === true) {
+      for (const item of args.action_items) {
+        const deadline = parseDateFromItem(item);
+        const issue = await jira.createIssue({
+          projectKey: jiraProject,
+          summary: item,
+          description: `회의록 참조: ${notionPage.url}`,
+          issueType: config.jira.taskType,
+          labels: ["scrum-action-item"],
+          startDate: today,
+          dueDate: deadline,
+        });
+        actionIssues.push(issue);
+      }
     }
 
     const jiraDescription = [
@@ -277,15 +290,20 @@ export async function finishMeeting(raw: unknown) {
       .sort()
       .at(-1);
 
-    const summaryIssue = await jira.createIssue({
-      projectKey: jiraProject,
-      summary: title,
-      description: jiraDescription,
-      issueType: config.jira.taskType,
-      labels: ["scrum-meeting"],
-      startDate: today,
-      dueDate: latestDeadline,
-    });
+    // 회의 메타 이슈도 create_action_issues 플래그에 묶음
+    // (기본 false → 백로그 오염 방지; 회의록은 Notion에만 남고 Jira엔 안 남음)
+    const summaryIssue =
+      args.create_action_issues === true
+        ? await jira.createIssue({
+            projectKey: jiraProject,
+            summary: title,
+            description: jiraDescription,
+            issueType: config.jira.taskType,
+            labels: ["scrum-meeting"],
+            startDate: today,
+            dueDate: latestDeadline,
+          })
+        : null;
 
     const sprintInfo = "백로그에 생성됨 (무료 요금제 — 스프린트 배정은 Jira UI에서)";
 
@@ -320,13 +338,16 @@ export async function finishMeeting(raw: unknown) {
       "## 요약",
       args.summary,
       "",
-      "## 액션 아이템 (Jira 티켓)",
-      jiraActionLinks || "(없음)",
+      "## 액션 아이템",
+      args.create_action_issues === true
+        ? jiraActionLinks || "(없음)"
+        : args.action_items.map((it, i) => `${i + 1}. ${it}`).join("\n") ||
+          "(없음)",
       "",
       "## 링크",
       `- 원본 회의 스레드: <#${threadId}>`,
       `- Notion: ${notionPage.url}`,
-      `- Jira 회의 요약: ${summaryIssue.url}`,
+      ...(summaryIssue ? [`- Jira 회의 요약: ${summaryIssue.url}`] : []),
     ].join("\n");
 
     const { thread: summaryThread } = await discord.createForumThread(
@@ -337,10 +358,30 @@ export async function finishMeeting(raw: unknown) {
     );
 
     // state 클리어 + 다음 prepare_meeting의 since 기준 갱신
+    // currentMeetingThreadId는 클리어 직전에 lastFinishedMeetingThreadId로 백업
+    // → apply_meeting_to_backlog가 finish_meeting 직후에도 같은 스레드 댓글 참조 가능
+    state.lastFinishedMeetingThreadId = threadId;
     state.lastPrepareMeetingAt = new Date().toISOString();
     state.currentMeetingThreadId = null;
     state.pendingConfirmations = [];
     await saveState(state);
+
+    const jiraLine = summaryIssue
+      ? `  Jira 회의 요약: ${summaryIssue.url}\n`
+      : `  Jira 회의 요약: (생략 — create_action_issues=false)\n`;
+    const actionLine =
+      args.create_action_issues === true
+        ? `  Jira 액션 아이템: ${actionIssues.length}개 (${actionIssues
+            .map((i) => i.key)
+            .join(", ")})\n`
+        : `  Jira 액션 아이템: (생략 — apply_meeting_to_backlog로 기존 백로그 업데이트 권장)\n`;
+
+    const nextStepHint =
+      args.create_action_issues === true
+        ? ""
+        : "\n다음 단계:\n" +
+          "  apply_meeting_to_backlog 도구를 인자 없이(invoker_id만) 호출하면\n" +
+          "  방금 수집한 회의 댓글과 백로그 전체를 분석해 기존 이슈에 변경사항을 적용할 수 있다.\n";
 
     return {
       content: [
@@ -352,11 +393,12 @@ export async function finishMeeting(raw: unknown) {
             `  원본 스레드 태그: [${config.discord.tagInProgress}] → [${config.discord.tagCompleted}]\n` +
             `  정리 스레드: ${summaryThread.id} (${summaryThread.name})\n` +
             `  Notion: ${notionPage.url}\n` +
-            `  Jira 액션 아이템: ${actionIssues.length}개 (${actionIssues.map(i => i.key).join(", ")})\n` +
-            `  Jira 회의 요약: ${summaryIssue.url}\n` +
+            actionLine +
+            jiraLine +
             `  스프린트: ${sprintInfo}\n` +
             `  완료 처리: ${completedResults.length > 0 ? completedResults.join(", ") : "없음"}\n` +
-            `  락 ID: ${acquired.id} (TTL ${acquired.expiresAt})`,
+            `  락 ID: ${acquired.id} (TTL ${acquired.expiresAt})` +
+            nextStepHint,
         },
       ],
     };

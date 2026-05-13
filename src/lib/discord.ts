@@ -166,6 +166,44 @@ export class DiscordClient {
     });
     return (await res.json()) as DiscordThread;
   }
+
+  /**
+   * 메시지에 봇이 직접 reaction을 추가. 사용자가 클릭하기 쉽도록 미리 달아둘 때 사용.
+   * emoji는 유니코드(예: "✅") 또는 커스텀 "name:id" 형식.
+   */
+  async addReaction(
+    channelId: string,
+    messageId: string,
+    emoji: string,
+  ): Promise<void> {
+    const encoded = encodeURIComponent(emoji);
+    await this.request(
+      "PUT",
+      `/channels/${channelId}/messages/${messageId}/reactions/${encoded}/@me`,
+    );
+  }
+
+  /**
+   * 특정 이모지로 reaction을 누른 사용자 목록을 반환.
+   * 봇 자신의 reaction은 제외해서 반환한다 (Discord는 기본적으로 봇도 포함).
+   */
+  async getReactionUsers(
+    channelId: string,
+    messageId: string,
+    emoji: string,
+  ): Promise<Array<{ id: string; username: string; bot?: boolean }>> {
+    const encoded = encodeURIComponent(emoji);
+    const res = await this.request(
+      "GET",
+      `/channels/${channelId}/messages/${messageId}/reactions/${encoded}?limit=100`,
+    );
+    const users = (await res.json()) as Array<{
+      id: string;
+      username: string;
+      bot?: boolean;
+    }>;
+    return users.filter((u) => !u.bot);
+  }
 }
 
 /**

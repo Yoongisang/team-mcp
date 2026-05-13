@@ -211,4 +211,227 @@ export class JiraClient {
       body: { transition: { id: done.id } },
     });
   }
+
+  /**
+   * 이슈를 "진행 중" 상태로 전이. 완료된 이슈를 회의에서 다시 살릴 때 사용.
+   * "In Progress" / "진행 중" / "In Review" 등 다양한 이름을 탐색.
+   */
+  async transitionIssueToInProgress(issueKey: string): Promise<string> {
+    const data = (await this.request(
+      `/rest/api/3/issue/${issueKey}/transitions`,
+    )) as { transitions?: Array<{ id: string; name: string }> };
+    const transitions = data.transitions ?? [];
+    const target =
+      transitions.find(
+        (t) =>
+          t.name.toLowerCase() === "in progress" ||
+          t.name === "진행 중" ||
+          t.name === "진행중",
+      ) ??
+      transitions.find(
+        (t) =>
+          t.name.toLowerCase() === "to do" ||
+          t.name === "할 일" ||
+          t.name === "할일",
+      );
+    if (!target)
+      throw new Error(
+        `${issueKey}: '진행 중'/'할 일' 트랜지션 없음. 사용 가능: ${transitions
+          .map((t) => t.name)
+          .join(", ")}`,
+      );
+    await this.request(`/rest/api/3/issue/${issueKey}/transitions`, {
+      method: "POST",
+      body: { transition: { id: target.id } },
+    });
+    return target.name;
+  }
+
+  /**
+   * 프로젝트의 모든 이슈를 페이지네이션으로 fetch.
+   * 백로그 + 활성/미래 스프린트 작업 모두 포함.
+   */
+  async listAllIssues(projectKey: string): Promise<
+    Array<{
+      key: string;
+      summary: string;
+      status: string;
+      issueType: string;
+      assigneeName: string | null;
+      assigneeAccountId: string | null;
+      parentKey: string | null;
+      labels: string[];
+      dueDate: string | null;
+      startDate: string | null;
+      sprintId: number | null;
+      sprintName: string | null;
+    }>
+  > {
+    const fields = [
+      "summary",
+      "status",
+      "issuetype",
+      "assignee",
+      "parent",
+      "labels",
+      "duedate",
+      "customfield_10015", // start date
+      "customfield_10020", // sprint (Jira Software 표준)
+    ];
+    const results: Array<Awaited<ReturnType<typeof this.listAllIssues>>[number]> = [];
+    let startAt = 0;
+    const maxResults = 100;
+    while (true) {
+      const data = (await this.request("/rest/api/3/search", {
+        method: "POST",
+        body: {
+          jql: `project = "${projectKey}" ORDER BY created ASC`,
+          fields,
+          startAt,
+          maxResults,
+        },
+      })) as {
+        issues?: Array<{
+          key: string;
+          fields: Record<string, unknown>;
+        }>;
+        total?: number;
+      };
+      const issues = data.issues ?? [];
+      for (const i of issues) {
+        const f = i.fields;
+        const status = (f.status as { name?: string } | undefined)?.name ?? "";
+        const issueType =
+          (f.issuetype as { name?: string } | undefined)?.name ?? "";
+        const assignee = f.assignee as
+          | { displayName?: string; accountId?: string }
+          | undefined
+          | null;
+        const parent = f.parent as { key?: string } | undefined;
+        const sprints = f.customfield_10020 as
+          | Array<{ id?: number; name?: string; state?: string }>
+          | undefined;
+        // 활성 또는 미래 스프린트 우선
+        const activeSprint =
+          sprints?.find((s) => s.state === "active") ?? sprints?.[0];
+        results.push({
+          key: i.key,
+          summary: (f.summary as string) ?? "",
+          status,
+          issueType,
+          assigneeName: assignee?.displayName ?? null,
+          assigneeAccountId: assignee?.accountId ?? null,
+          parentKey: parent?.key ?? null,
+          labels: (f.labels as string[]) ?? [],
+          dueDate: (f.duedate as string | null) ?? null,
+          startDate: (f.customfield_10015 as string | null) ?? null,
+          sprintId: activeSprint?.id ?? null,
+          sprintName: activeSprint?.name ?? null,
+        });
+      }
+      if (issues.length < maxResults) break;
+      startAt += maxResults;
+      if (startAt > 1000) break; // 안전장치
+    }
+    return results;
+  }
+
+  /**
+   * 이슈 필드를 부분 업데이트. assignee/duedate/startDate/labels 지원.
+   * 빈 값은 무시(기존 값 유지). null을 명시하면 필드 제거.
+   */
+  async updateIssue(
+    issueKey: string,
+    opts: {
+      assigneeAccountId?: string | null;
+      dueDate?: string | null;
+      startDate?: string | null;
+      addLabels?: string[];
+    },
+  ): Promise<void> {
+    const fields: Record<string, unknown> = {};
+    if (opts.assigneeAccountId !== undefined) {
+      fields.assignee =
+        opts.assigneeAccountId === null
+          ? null
+          : { accountId: opts.assigneeAccountId };
+    }
+    if (opts.dueDate !== undefined) fields.duedate = opts.dueDate;
+    if (opts.startDate !== undefined) fields.customfield_10015 = opts.startDate;
+    if (opts.addLabels?.length) {
+      // 라벨 추가는 update[].add 문법
+      await this.request(`/rest/api/3/issue/${issueKey}`, {
+        method: "PUT",
+        body: {
+          update: {
+            labels: opts.addLabels.map((l) => ({ add: l })),
+          },
+        },
+      });
+    }
+    if (Object.keys(fields).length > 0) {
+      await this.request(`/rest/api/3/issue/${issueKey}`, {
+        method: "PUT",
+        body: { fields },
+      });
+    }
+  }
+
+  /**
+   * 이슈에 코멘트 추가. 회의 출처/맥락을 남기는 용도.
+   */
+  async addComment(issueKey: string, text: string): Promise<void> {
+    await this.request(`/rest/api/3/issue/${issueKey}/comment`, {
+      method: "POST",
+      body: {
+        body: {
+          type: "doc",
+          version: 1,
+          content: [
+            {
+              type: "paragraph",
+              content: [{ type: "text", text }],
+            },
+          ],
+        },
+      },
+    });
+  }
+
+  /**
+   * 표시 이름(displayName)으로 사용자 검색 → accountId 반환.
+   * 동명이인은 첫 번째 매치 사용. 없으면 null.
+   */
+  async findUserByDisplayName(
+    name: string,
+    projectKey: string,
+  ): Promise<{ accountId: string; displayName: string } | null> {
+    try {
+      const data = (await this.request(
+        `/rest/api/3/user/assignable/search?query=${encodeURIComponent(
+          name,
+        )}&project=${projectKey}&maxResults=10`,
+      )) as Array<{ accountId: string; displayName: string }>;
+      if (data.length === 0) return null;
+      // displayName 정확 매치 우선
+      const exact = data.find((u) => u.displayName === name);
+      return exact ?? data[0]!;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 이슈를 스프린트로 이동. 기존에 스프린트가 있으면 옮겨감.
+   */
+  async moveIssuesToSprint(
+    sprintId: number,
+    issueKeys: string[],
+  ): Promise<void> {
+    if (issueKeys.length === 0) return;
+    await this.request(`/rest/agile/1.0/sprint/${sprintId}/issue`, {
+      method: "POST",
+      body: { issues: issueKeys },
+    });
+  }
 }
