@@ -48,8 +48,9 @@ export const applyMeetingToBacklogTool: Tool = {
     "PM/팀장 전용. 회의 댓글을 분석해 기존 Jira 백로그/스프린트 작업에 변경사항(담당자·기한·스프린트·코멘트·재오픈)을 적용. " +
     "3단계 호출:\n" +
     "  [Phase 1] 인자 없이(invoker_id만) 호출 → 백로그 전체 + 회의 댓글 컨텍스트 반환. LLM은 이를 분석해 proposals 작성.\n" +
-    "  [Phase 2] proposals 인자 전달 → Discord 정리 스레드에 미리보기 게시 + ✅ reaction 대기. state에 승인 대기 저장.\n" +
-    "  [Phase 3] confirm: true 전달 → 저장된 메시지의 ✅ reaction 확인 후 일괄 적용. ALLOWED_USERS만 승인 가능.\n" +
+    "  [Phase 2] proposals 인자 전달 → Discord 정리 스레드에 미리보기 게시. state에 승인 대기 저장.\n" +
+    "  [Phase 3] confirm: true 전달 → 일괄 적용. invoker_id가 ALLOWED_USERS면 즉시 적용 (텍스트 명령 승인).\n" +
+    "schedule 액션에 dueDate가 있으면 자동으로 해당 마감일을 포함하는 스프린트로 이동시킨다 (별도 move_to_sprint 불필요). " +
     "회의 종료 후 finish_meeting 다음에 호출하며, 회의 스레드는 state.currentMeetingThreadId 기준. " +
     "finish_meeting이 이미 currentMeetingThreadId를 클리어했다면 state.lastPrepareMeetingAt 흔적이 없으니 사용자에게 prepare → finish 순으로 재진행을 안내한다.",
   inputSchema: {
@@ -186,44 +187,11 @@ export async function applyMeetingToBacklog(raw: unknown) {
       };
     }
 
-    // Discord 메시지의 ✅ reaction 조회
-    let reactors: Array<{ id: string; username: string }>;
-    try {
-      reactors = await discord.getReactionUsers(
-        pending.threadId,
-        pending.messageId,
-        APPROVAL_EMOJI,
-      );
-    } catch (e) {
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: `Discord reaction 조회 실패: ${e}\n메시지가 삭제되었거나 권한이 없을 수 있습니다.`,
-          },
-        ],
-      };
-    }
-
-    const approverIds = new Set(config.allowedUsers);
-    const approvers = reactors.filter((u) => approverIds.has(u.id));
-    if (approvers.length === 0) {
-      const reactorList =
-        reactors.length === 0
-          ? "(아무도 누르지 않음)"
-          : reactors.map((u) => `@${u.username}`).join(", ");
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text:
-              `아직 권한 있는 사용자의 승인이 없습니다.\n` +
-              `현재 ${APPROVAL_EMOJI} 누른 사람: ${reactorList}\n` +
-              `ALLOWED_USERS 중 한 명이 Discord 미리보기 메시지에 ${APPROVAL_EMOJI}을 누른 뒤 다시 호출하세요.`,
-          },
-        ],
-      };
-    }
+    // 텍스트 명령 승인 방식:
+    // checkPermission(args.invoker_id, ...)가 함수 진입 시 이미 호출됐으므로,
+    // confirm: true로 도달한 이상 invoker는 ALLOWED_USERS 멤버임이 보장됨.
+    // ✅ reaction 조회 단계는 제거 — 사용자가 "백로그 변경 확정해줘" 등 텍스트로 직접 호출.
+    const approverId = args.invoker_id;
 
     // 적용 시작
     const results: string[] = [];
@@ -257,6 +225,31 @@ export async function applyMeetingToBacklog(raw: unknown) {
             const parts: string[] = [];
             if (p.startDate) parts.push(`시작 ${p.startDate}`);
             if (p.dueDate) parts.push(`기한 ${p.dueDate}`);
+
+            // dueDate 있으면 자동으로 그 마감일을 포함하는 스프린트로 이동.
+            // 사용자가 일일이 sprintId 지정하지 않아도, 마감일 기준 자동 배정.
+            // 실패해도 schedule 자체는 성공으로 처리 (코멘트/기한 적용은 이미 끝남).
+            if (p.dueDate) {
+              try {
+                const boardId = await jira.getBoardId(jiraProject);
+                if (boardId !== null) {
+                  const today = new Date().toISOString().slice(0, 10);
+                  const sprintId = await jira.getOrCreateSprintByEndDate(
+                    boardId, p.dueDate, today,
+                  );
+                  if (sprintId !== null) {
+                    await jira.moveIssuesToSprint(sprintId, [p.issueKey]);
+                    parts.push(`스프린트 자동 배정(id=${sprintId})`);
+                  }
+                }
+              } catch (e) {
+                console.error(
+                  `[apply_meeting_to_backlog] auto-sprint failed for ${p.issueKey}:`,
+                  e,
+                );
+              }
+            }
+
             results.push(`${p.issueKey} → ${parts.join(", ") || "(변경 없음)"}`);
             break;
           }
@@ -291,7 +284,7 @@ export async function applyMeetingToBacklog(raw: unknown) {
     // 결과를 Discord 정리 스레드에 게시
     const resultBody = [
       `## 백로그 업데이트 적용 완료`,
-      `승인자: ${approvers.map((u) => `@${u.username}`).join(", ")}`,
+      `확정자 ID: ${approverId}`,
       "",
       `### 성공 (${results.length}건)`,
       results.length > 0 ? results.map((r) => `- ${r}`).join("\n") : "(없음)",
@@ -321,7 +314,7 @@ export async function applyMeetingToBacklog(raw: unknown) {
           type: "text" as const,
           text:
             `✅ 적용 완료\n` +
-            `  승인자: ${approvers.map((u) => `@${u.username}`).join(", ")}\n` +
+            `  확정자 ID: ${approverId}\n` +
             `  성공: ${results.length}건\n` +
             `  실패: ${failures.length}건\n\n` +
             (results.length > 0
@@ -365,12 +358,12 @@ export async function applyMeetingToBacklog(raw: unknown) {
       `# 📋 백로그 업데이트 미리보기 (${today})`,
       "",
       `회의에서 다음 ${args.proposals.length}건의 변경을 제안합니다.`,
-      `**검토 후 이 메시지에 ${APPROVAL_EMOJI} 를 눌러주세요.** 권한 있는 사용자(PM/팀장)의 ${APPROVAL_EMOJI} 1개로 일괄 적용됩니다.`,
+      `**검토 후 PM/팀장은 "백로그 변경 확정해줘" 라고 명령해주세요.** 권한 있는 사용자만 확정 가능합니다.`,
       "",
       renderProposalsPreview(args.proposals, issueMap),
       "",
       "---",
-      `_24시간 내 ${APPROVAL_EMOJI} 없으면 만료됩니다._`,
+      `_24시간 내 확정 명령이 없으면 만료됩니다._`,
     ].join("\n");
 
     // 정리 스레드를 찾아서 게시. finish_meeting이 직전에 정리 스레드를 만들었지만
@@ -389,18 +382,12 @@ export async function applyMeetingToBacklog(raw: unknown) {
       [summaryTagId!],
     );
 
-    // 첫 메시지(스레드의 첫 메시지)에 ✅ 미리 달아두기 — 스레드 ID == 첫 메시지 ID
-    // Discord 포럼: 스레드 생성 시 본문은 thread.id와 동일 ID의 메시지로 들어감
+    // 메시지 ID는 추적용으로 보관 (향후 결과 게시 위치 등에 활용 가능).
+    // ✅ 리액션 자동 부착은 제거 — 텍스트 명령 승인 방식으로 전환.
     const previewMessageId =
       followupMessageIds.length > 0
         ? followupMessageIds[followupMessageIds.length - 1]!
         : thread.id;
-
-    try {
-      await discord.addReaction(thread.id, previewMessageId, APPROVAL_EMOJI);
-    } catch (e) {
-      console.error("[apply_meeting_to_backlog] addReaction failed:", e);
-    }
 
     // state에 승인 대기 저장
     const pending: PendingBacklogApproval = {
@@ -419,12 +406,10 @@ export async function applyMeetingToBacklog(raw: unknown) {
           text:
             `📋 미리보기 게시 완료\n` +
             `  Discord 스레드: ${thread.name} (${thread.id})\n` +
-            `  메시지 ID: ${previewMessageId}\n` +
             `  제안 수: ${args.proposals.length}건\n\n` +
             `다음 단계:\n` +
-            `  1. PM/팀장이 Discord 스레드에서 ${APPROVAL_EMOJI} 클릭\n` +
-            `  2. 클릭 후 'apply_meeting_to_backlog confirm:true' 호출\n` +
-            `  3. 자동으로 일괄 적용 + 결과 게시\n\n` +
+            `  1. PM/팀장이 "백로그 변경 확정해줘" 라고 명령\n` +
+            `  2. 자동으로 일괄 적용 + 결과 게시 (스케줄 액션은 마감일 기준 스프린트로 자동 배정)\n\n` +
             `_24시간 후 자동 만료._`,
         },
       ],
@@ -513,6 +498,10 @@ export async function applyMeetingToBacklog(raw: unknown) {
     "  - 동일 이슈에 여러 변경이 있으면 여러 proposal로 분할 (예: 담당자+기한 = assign + schedule 2건).",
     "  - `assign` 액션의 assigneeName은 회의에서 **명시적으로 누가 맡기로 했는지** 발화된 경우에만 채울 것.",
     "    누가 맡았는지 회의에 언급이 없으면 assign 액션 자체를 만들지 말 것 (현재 담당자 추정 금지).",
+    "  - **`schedule` 액션에 dueDate를 넣으면 서버가 자동으로 그 마감일에 맞는 스프린트로 이동시킴.**",
+    "    별도로 `move_to_sprint` proposal을 만들 필요 없음. dueDate만 정확히 추출하면 됨.",
+    "    회의에서 마감일이 언급된 작업은 거의 모두 `schedule` 액션으로 만들어 백로그에서 스프린트로 자동 승격되게 하라.",
+    "  - `move_to_sprint`는 마감일 변경 없이 다른 스프린트로 이동시킬 때만 사용 (드문 케이스).",
     "  - 모든 proposal에 가능한 한 `comment`를 포함해 회의 출처를 남겨라 (예: '회의 2026-05-13에서 김XX가 맡기로 함').",
     "  - 완료 상태(Done/완료) 이슈가 회의에서 '다시', '추가', '재작업' 등으로 언급되면 `reopen`.",
     "  - 백로그에 없는 신규 작업 요청은 proposals에 넣지 말고, 별도로 사용자에게 '신규 이슈 생성이 필요해 보입니다' 보고.",
