@@ -60,6 +60,7 @@ const Args = z.object({
   invoker_id: z.string().min(1),
   proposals: z.array(ProposalSchema).optional(),
   confirm: z.boolean().optional(),
+  preview_thread_id: z.string().optional(),
 });
 
 export const applyMeetingToBacklogTool: Tool = {
@@ -138,6 +139,11 @@ export const applyMeetingToBacklogTool: Tool = {
         description:
           "[Phase 3 전용] true이면 state의 pendingBacklogApproval을 적용. " +
           "PM/팀장이 미리보기를 확인한 뒤 텍스트 명령으로 호출.",
+      },
+      preview_thread_id: {
+        type: "string",
+        description:
+          "[Phase 2 선택] 기존 백로그 업데이트 미리보기 스레드 ID. 전달하면 새 포럼 포스트 대신 해당 스레드 댓글로 미리보기를 게시.",
       },
     },
     required: ["invoker_id"],
@@ -484,37 +490,78 @@ export async function applyMeetingToBacklog(raw: unknown) {
       `_24시간 내 확정 명령이 없으면 만료됩니다._`,
     ].join("\n");
 
-    // 정리 스레드를 찾아서 게시. finish_meeting이 직전에 정리 스레드를 만들었지만
-    // 스레드 ID를 state에 저장하지 않으므로, 가장 최근의 [정리] 태그 스레드를
-    // 찾는 대신 currentMeetingThreadId(이미 닫힘) 또는 forum에 직접 새 스레드 생성.
-    // 가장 단순한 안전책: 포럼에 [정리] 태그로 새 스레드 생성.
     const forum = await discord.getChannel(forumId);
     const [summaryTagId] = resolveForumTagIds(forum, [
       config.discord.tagSummary,
     ]);
 
-    const { thread, followupMessageIds } = await discord.createForumThread(
-      forumId,
-      `백로그 업데이트 미리보기 ${today}`,
-      previewBody,
-      [summaryTagId!],
-    );
+    const sourceThreadId =
+      state.currentMeetingThreadId ?? state.lastFinishedMeetingThreadId;
+    const canReuseStoredPreview =
+      !!sourceThreadId &&
+      state.lastBacklogPreviewSourceThreadId === sourceThreadId;
+    const requestedThreadId =
+      args.preview_thread_id ??
+      (canReuseStoredPreview ? state.pendingBacklogApproval?.threadId : undefined) ??
+      (canReuseStoredPreview ? state.lastBacklogPreviewThreadId : undefined);
+
+    let previewThreadId: string;
+    let previewThreadName: string;
+    let previewMessageIds: string[];
+    let postedAsReply = false;
+
+    if (requestedThreadId) {
+      try {
+        const existingThread = await discord.getChannel(requestedThreadId);
+        previewMessageIds = await discord.postChunked(requestedThreadId, previewBody);
+        previewThreadId = requestedThreadId;
+        previewThreadName = existingThread.name ?? requestedThreadId;
+        postedAsReply = true;
+      } catch (e) {
+        console.error(
+          `[apply_meeting_to_backlog] preview thread reuse failed (${requestedThreadId}); creating a new preview thread:`,
+          e,
+        );
+        const { thread, followupMessageIds } = await discord.createForumThread(
+          forumId,
+          `백로그 업데이트 미리보기 ${today}`,
+          previewBody,
+          [summaryTagId!],
+        );
+        previewThreadId = thread.id;
+        previewThreadName = thread.name;
+        previewMessageIds = followupMessageIds.length > 0
+          ? followupMessageIds
+          : [thread.id];
+      }
+    } else {
+      const { thread, followupMessageIds } = await discord.createForumThread(
+        forumId,
+        `백로그 업데이트 미리보기 ${today}`,
+        previewBody,
+        [summaryTagId!],
+      );
+      previewThreadId = thread.id;
+      previewThreadName = thread.name;
+      previewMessageIds = followupMessageIds.length > 0
+        ? followupMessageIds
+        : [thread.id];
+    }
 
     // 메시지 ID는 추적용으로 보관 (향후 결과 게시 위치 등에 활용 가능).
     // ✅ 리액션 자동 부착은 제거 — 텍스트 명령 승인 방식으로 전환.
-    const previewMessageId =
-      followupMessageIds.length > 0
-        ? followupMessageIds[followupMessageIds.length - 1]!
-        : thread.id;
+    const previewMessageId = previewMessageIds[previewMessageIds.length - 1]!;
 
     // state에 승인 대기 저장
     const pending: PendingBacklogApproval = {
-      threadId: thread.id,
+      threadId: previewThreadId,
       messageId: previewMessageId,
       proposals: args.proposals,
       createdAt: new Date().toISOString(),
     };
     state.pendingBacklogApproval = pending;
+    state.lastBacklogPreviewThreadId = previewThreadId;
+    state.lastBacklogPreviewSourceThreadId = sourceThreadId ?? null;
     await saveState(state);
 
     return {
@@ -523,7 +570,8 @@ export async function applyMeetingToBacklog(raw: unknown) {
           type: "text" as const,
           text:
             `📋 미리보기 게시 완료\n` +
-            `  Discord 스레드: ${thread.name} (${thread.id})\n` +
+            `  방식: ${postedAsReply ? "기존 미리보기 스레드 댓글" : "새 미리보기 스레드"}\n` +
+            `  Discord 스레드: ${previewThreadName} (${previewThreadId})\n` +
             `  제안 수: ${args.proposals.length}건\n\n` +
             `다음 단계:\n` +
             `  1. PM/팀장이 "백로그 변경 확정해줘" 라고 명령\n` +

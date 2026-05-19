@@ -58,6 +58,10 @@ export interface ScrumState {
   pendingConfirmations: PendingConfirmation[];
   /** apply_meeting_to_backlog Phase 2에서 저장, Phase 3에서 확인 후 클리어. */
   pendingBacklogApproval: PendingBacklogApproval | null;
+  /** 마지막 백로그 업데이트 미리보기 스레드. 후속 미리보기를 같은 댓글 흐름에 붙일 때 사용. */
+  lastBacklogPreviewThreadId: string | null;
+  /** 마지막 백로그 미리보기가 기준으로 삼은 회의 스레드 ID. 새 회의와 이전 미리보기를 섞지 않기 위함. */
+  lastBacklogPreviewSourceThreadId: string | null;
 }
 
 const DEFAULT_STATE: ScrumState = {
@@ -67,6 +71,8 @@ const DEFAULT_STATE: ScrumState = {
   lastFinishedMeetingThreadId: null,
   pendingConfirmations: [],
   pendingBacklogApproval: null,
+  lastBacklogPreviewThreadId: null,
+  lastBacklogPreviewSourceThreadId: null,
 };
 
 export async function loadState(): Promise<ScrumState> {
@@ -83,6 +89,8 @@ export async function loadState(): Promise<ScrumState> {
       lastFinishedMeetingThreadId: parsed.lastFinishedMeetingThreadId ?? null,
       pendingConfirmations: Array.isArray(parsed.pendingConfirmations) ? parsed.pendingConfirmations : [],
       pendingBacklogApproval: parsed.pendingBacklogApproval ?? null,
+      lastBacklogPreviewThreadId: parsed.lastBacklogPreviewThreadId ?? null,
+      lastBacklogPreviewSourceThreadId: parsed.lastBacklogPreviewSourceThreadId ?? null,
     };
   } catch {
     return { ...DEFAULT_STATE, completions: [] };
