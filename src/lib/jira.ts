@@ -153,6 +153,9 @@ export class JiraClient {
     endDate: string,
     today: string,
   ): Promise<number | null> {
+    const toSprintDateTime = (date: string, endOfDay: boolean) =>
+      `${date}T${endOfDay ? "23:59:00.000" : "00:00:00.000"}Z`;
+
     try {
       // future/active 스프린트 중 endDate가 일치하는 것 검색
       for (const state of ["future", "active"]) {
@@ -170,8 +173,8 @@ export class JiraClient {
         body: {
           name: `Sprint ~${endDate}`,
           originBoardId: boardId,
-          startDate: today,
-          endDate,
+          startDate: toSprintDateTime(today, false),
+          endDate: toSprintDateTime(endDate, true),
         },
       })) as { id: number };
       return sprint.id;

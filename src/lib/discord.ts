@@ -6,7 +6,7 @@ export interface DiscordMessage {
   id: string;
   channel_id: string;
   content: string;
-  author: { id: string; username: string };
+  author: { id: string; username: string; bot?: boolean };
   timestamp: string;
 }
 
@@ -101,6 +101,25 @@ export class DiscordClient {
       `/channels/${channelId}/messages?${params}`,
     );
     return (await res.json()) as DiscordMessage[];
+  }
+
+  async listAllMessages(
+    channelId: string,
+    maxMessages = 1000,
+  ): Promise<DiscordMessage[]> {
+    const messages: DiscordMessage[] = [];
+    let before: string | undefined;
+
+    while (messages.length < maxMessages) {
+      const limit = Math.min(100, maxMessages - messages.length);
+      const batch = await this.listMessages(channelId, { limit, before });
+      if (batch.length === 0) break;
+      messages.push(...batch);
+      before = batch[batch.length - 1]?.id;
+      if (batch.length < limit) break;
+    }
+
+    return messages;
   }
 
   async deleteMessage(channelId: string, messageId: string): Promise<void> {

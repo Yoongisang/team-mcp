@@ -15,25 +15,45 @@ import {
   type PendingBacklogApproval,
 } from "../lib/state.js";
 
-/** 사용자가 누를 승인 이모지. Discord API에 보낼 때 유니코드 그대로. */
-const APPROVAL_EMOJI = "✅";
 /** pendingBacklogApproval TTL (24시간). */
 const APPROVAL_TTL_MS = 24 * 60 * 60 * 1000;
 
 const ProposalSchema = z.object({
-  issueKey: z.string().min(1),
+  issueKey: z.string().min(1).optional(),
   action: z.enum([
+    "create",
     "assign",
     "schedule",
     "move_to_sprint",
     "comment_only",
     "reopen",
   ]),
+  summary: z.string().min(1).optional(),
+  issueType: z.string().optional(),
+  labels: z.array(z.string()).optional(),
   assigneeName: z.string().optional(),
   startDate: z.string().optional(),
   dueDate: z.string().optional(),
   sprintId: z.number().int().optional(),
   comment: z.string().optional(),
+}).superRefine((p, ctx) => {
+  if (p.action === "create") {
+    if (!p.summary) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["summary"],
+        message: "create action requires summary",
+      });
+    }
+    return;
+  }
+  if (!p.issueKey) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["issueKey"],
+      message: `${p.action} action requires issueKey`,
+    });
+  }
 });
 
 const Args = z.object({
@@ -45,12 +65,12 @@ const Args = z.object({
 export const applyMeetingToBacklogTool: Tool = {
   name: "apply_meeting_to_backlog",
   description:
-    "PM/팀장 전용. 회의 댓글을 분석해 기존 Jira 백로그/스프린트 작업에 변경사항(담당자·기한·스프린트·코멘트·재오픈)을 적용. " +
+    "PM/팀장 전용. 회의 댓글을 분석해 기존 Jira 백로그/스프린트 작업에 변경사항(담당자·기한·스프린트·코멘트·재오픈)을 적용하고, Jira에 없는 작업은 새 이슈로 생성. " +
     "3단계 호출:\n" +
     "  [Phase 1] 인자 없이(invoker_id만) 호출 → 백로그 전체 + 회의 댓글 컨텍스트 반환. LLM은 이를 분석해 proposals 작성.\n" +
     "  [Phase 2] proposals 인자 전달 → Discord 정리 스레드에 미리보기 게시. state에 승인 대기 저장.\n" +
     "  [Phase 3] confirm: true 전달 → 일괄 적용. invoker_id가 ALLOWED_USERS면 즉시 적용 (텍스트 명령 승인).\n" +
-    "schedule 액션에 dueDate가 있으면 자동으로 해당 마감일을 포함하는 스프린트로 이동시킨다 (별도 move_to_sprint 불필요). " +
+    "create/schedule 액션에 dueDate가 있으면 자동으로 해당 마감일을 포함하는 스프린트로 이동시킨다 (별도 move_to_sprint 불필요). " +
     "회의 종료 후 finish_meeting 다음에 호출하며, 회의 스레드는 state.currentMeetingThreadId 기준. " +
     "finish_meeting이 이미 currentMeetingThreadId를 클리어했다면 state.lastPrepareMeetingAt 흔적이 없으니 사용자에게 prepare → finish 순으로 재진행을 안내한다.",
   inputSchema: {
@@ -65,22 +85,37 @@ export const applyMeetingToBacklogTool: Tool = {
         type: "array",
         description:
           "[Phase 2 전용] LLM이 회의 분석 후 작성한 변경 제안 목록. " +
-          "각 항목은 issueKey + action(assign/schedule/move_to_sprint/comment_only/reopen). " +
-          "필요 필드는 action별로 다름: assign→assigneeName, schedule→dueDate/startDate, " +
+          "각 항목은 action(create/assign/schedule/move_to_sprint/comment_only/reopen)을 가진다. " +
+          "기존 이슈 변경은 issueKey가 필요하고, Jira에 없는 새 작업은 create + summary가 필요하다. " +
+          "필요 필드는 action별로 다름: create→summary/dueDate/startDate, assign→assigneeName, schedule→dueDate/startDate, " +
           "move_to_sprint→sprintId, comment_only/reopen→comment.",
         items: {
           type: "object",
           properties: {
-            issueKey: { type: "string", description: "예: LIU-9" },
+            issueKey: { type: "string", description: "기존 Jira 이슈 키. 예: LIU-9. create 액션에서는 생략." },
             action: {
               type: "string",
               enum: [
+                "create",
                 "assign",
                 "schedule",
                 "move_to_sprint",
                 "comment_only",
                 "reopen",
               ],
+            },
+            summary: {
+              type: "string",
+              description: "create 액션으로 새 Jira 이슈를 만들 때 사용할 제목.",
+            },
+            issueType: {
+              type: "string",
+              description: "create 액션의 Jira 이슈 타입. 기본값은 JIRA_TASK_TYPE 또는 Task.",
+            },
+            labels: {
+              type: "array",
+              items: { type: "string" },
+              description: "create 액션에서 추가할 Jira label 목록.",
             },
             assigneeName: {
               type: "string",
@@ -94,7 +129,7 @@ export const applyMeetingToBacklogTool: Tool = {
               description: "회의 출처/맥락. 모든 액션에 코멘트 부착 권장.",
             },
           },
-          required: ["issueKey", "action"],
+          required: ["action"],
           additionalProperties: false,
         },
       },
@@ -102,7 +137,7 @@ export const applyMeetingToBacklogTool: Tool = {
         type: "boolean",
         description:
           "[Phase 3 전용] true이면 state의 pendingBacklogApproval을 적용. " +
-          "사용자가 Discord 미리보기 메시지에 ✅을 누른 뒤 호출.",
+          "PM/팀장이 미리보기를 확인한 뒤 텍스트 명령으로 호출.",
       },
     },
     required: ["invoker_id"],
@@ -122,10 +157,19 @@ function renderProposalsPreview(
   if (proposals.length === 0) return "(제안 없음)";
   return proposals
     .map((p, i) => {
-      const issue = issueMap.get(p.issueKey);
+      const issue = p.issueKey ? issueMap.get(p.issueKey) : undefined;
       const meta = issue ? ` (${issue.status}) ${issue.summary}` : "";
-      const parts: string[] = [`${i + 1}. **${p.issueKey}**${meta}`];
+      const keyLabel = p.action === "create"
+        ? `새 이슈: ${p.summary ?? "(제목 없음)"}`
+        : `${p.issueKey}${meta}`;
+      const parts: string[] = [`${i + 1}. **${keyLabel}**`];
       parts.push(`   액션: \`${p.action}\``);
+      if (p.issueKey && !issue && p.action !== "create") {
+        parts.push("   주의: 현재 Jira 목록에서 찾지 못한 이슈 키입니다.");
+      }
+      if (p.summary && p.action !== "create") parts.push(`   제목: ${p.summary}`);
+      if (p.issueType) parts.push(`   이슈 타입: ${p.issueType}`);
+      if (p.labels?.length) parts.push(`   라벨: ${p.labels.join(", ")}`);
       if (p.assigneeName) parts.push(`   담당자: ${p.assigneeName}`);
       if (p.startDate) parts.push(`   시작일: ${p.startDate}`);
       if (p.dueDate) parts.push(`   기한: ${p.dueDate}`);
@@ -197,10 +241,90 @@ export async function applyMeetingToBacklog(raw: unknown) {
     const results: string[] = [];
     const failures: string[] = [];
 
+    const requireIssueKey = (p: BacklogProposal): string => {
+      if (!p.issueKey) throw new Error(`${p.action} 액션은 issueKey가 필요합니다`);
+      return p.issueKey;
+    };
+
+    const moveToSprintForDueDate = async (
+      issueKey: string,
+      dueDate: string | undefined,
+      parts: string[],
+    ) => {
+      if (!dueDate) return;
+      try {
+        const boardId = await jira.getBoardId(jiraProject);
+        if (boardId === null) return;
+        const today = new Date().toISOString().slice(0, 10);
+        const sprintId = await jira.getOrCreateSprintByEndDate(
+          boardId,
+          dueDate,
+          today,
+        );
+        if (sprintId !== null) {
+          await jira.moveIssuesToSprint(sprintId, [issueKey]);
+          parts.push(`스프린트 자동 배정(id=${sprintId})`);
+        }
+      } catch (e) {
+        console.error(
+          `[apply_meeting_to_backlog] auto-sprint failed for ${issueKey}:`,
+          e,
+        );
+      }
+    };
+
     for (const p of pending.proposals) {
+      let commentTargetKey: string | undefined;
       try {
         switch (p.action) {
+          case "create": {
+            if (!p.summary) throw new Error("summary 누락");
+            const issue = await jira.createIssue({
+              projectKey: jiraProject,
+              summary: p.summary,
+              description: p.comment ? `[회의] ${p.comment}` : undefined,
+              issueType: p.issueType ?? config.jira.taskType,
+              labels: ["scrum-action-item", ...(p.labels ?? [])],
+              startDate: p.startDate,
+              dueDate: p.dueDate,
+            });
+            commentTargetKey = issue.key;
+
+            const parts: string[] = [`생성 ${issue.url}`];
+            if (p.startDate) parts.push(`시작 ${p.startDate}`);
+            if (p.dueDate) parts.push(`기한 ${p.dueDate}`);
+
+            if (p.assigneeName) {
+              try {
+                const user = await jira.findUserByDisplayName(
+                  p.assigneeName,
+                  jiraProject,
+                );
+                if (!user) {
+                  parts.push(`담당자 매칭 실패(${p.assigneeName})`);
+                } else {
+                  await jira.updateIssue(issue.key, {
+                    assigneeAccountId: user.accountId,
+                  });
+                  parts.push(`담당자 ${user.displayName}`);
+                }
+              } catch (e) {
+                parts.push(`담당자 적용 실패(${p.assigneeName}: ${e})`);
+              }
+            }
+
+            if (p.sprintId) {
+              await jira.moveIssuesToSprint(p.sprintId, [issue.key]);
+              parts.push(`스프린트 ${p.sprintId}`);
+            } else {
+              await moveToSprintForDueDate(issue.key, p.dueDate, parts);
+            }
+
+            results.push(`${issue.key} → ${parts.join(", ")}`);
+            break;
+          }
           case "assign": {
+            const issueKey = requireIssueKey(p);
             if (!p.assigneeName) {
               throw new Error("assigneeName 누락");
             }
@@ -211,14 +335,16 @@ export async function applyMeetingToBacklog(raw: unknown) {
             if (!user) {
               throw new Error(`사용자 '${p.assigneeName}' 못 찾음`);
             }
-            await jira.updateIssue(p.issueKey, {
+            await jira.updateIssue(issueKey, {
               assigneeAccountId: user.accountId,
             });
-            results.push(`${p.issueKey} → 담당자 ${user.displayName}`);
+            commentTargetKey = issueKey;
+            results.push(`${issueKey} → 담당자 ${user.displayName}`);
             break;
           }
           case "schedule": {
-            await jira.updateIssue(p.issueKey, {
+            const issueKey = requireIssueKey(p);
+            await jira.updateIssue(issueKey, {
               startDate: p.startDate,
               dueDate: p.dueDate,
             });
@@ -226,58 +352,50 @@ export async function applyMeetingToBacklog(raw: unknown) {
             if (p.startDate) parts.push(`시작 ${p.startDate}`);
             if (p.dueDate) parts.push(`기한 ${p.dueDate}`);
 
-            // dueDate 있으면 자동으로 그 마감일을 포함하는 스프린트로 이동.
-            // 사용자가 일일이 sprintId 지정하지 않아도, 마감일 기준 자동 배정.
-            // 실패해도 schedule 자체는 성공으로 처리 (코멘트/기한 적용은 이미 끝남).
-            if (p.dueDate) {
-              try {
-                const boardId = await jira.getBoardId(jiraProject);
-                if (boardId !== null) {
-                  const today = new Date().toISOString().slice(0, 10);
-                  const sprintId = await jira.getOrCreateSprintByEndDate(
-                    boardId, p.dueDate, today,
-                  );
-                  if (sprintId !== null) {
-                    await jira.moveIssuesToSprint(sprintId, [p.issueKey]);
-                    parts.push(`스프린트 자동 배정(id=${sprintId})`);
-                  }
-                }
-              } catch (e) {
-                console.error(
-                  `[apply_meeting_to_backlog] auto-sprint failed for ${p.issueKey}:`,
-                  e,
-                );
-              }
+            if (p.sprintId) {
+              await jira.moveIssuesToSprint(p.sprintId, [issueKey]);
+              parts.push(`스프린트 ${p.sprintId}`);
+            } else if (p.dueDate) {
+              await moveToSprintForDueDate(issueKey, p.dueDate, parts);
             }
 
-            results.push(`${p.issueKey} → ${parts.join(", ") || "(변경 없음)"}`);
+            commentTargetKey = issueKey;
+            results.push(`${issueKey} → ${parts.join(", ") || "(변경 없음)"}`);
             break;
           }
           case "move_to_sprint": {
+            const issueKey = requireIssueKey(p);
             if (!p.sprintId) throw new Error("sprintId 누락");
-            await jira.moveIssuesToSprint(p.sprintId, [p.issueKey]);
-            results.push(`${p.issueKey} → 스프린트 ${p.sprintId}`);
+            await jira.moveIssuesToSprint(p.sprintId, [issueKey]);
+            commentTargetKey = issueKey;
+            results.push(`${issueKey} → 스프린트 ${p.sprintId}`);
             break;
           }
           case "reopen": {
+            const issueKey = requireIssueKey(p);
             const transitioned = await jira.transitionIssueToInProgress(
-              p.issueKey,
+              issueKey,
             );
-            results.push(`${p.issueKey} → ${transitioned} 재오픈`);
+            commentTargetKey = issueKey;
+            results.push(`${issueKey} → ${transitioned} 재오픈`);
             break;
           }
-          case "comment_only":
+          case "comment_only": {
+            const issueKey = requireIssueKey(p);
             // 코멘트만 부착 (아래 공통 처리)
-            results.push(`${p.issueKey} → 코멘트만`);
+            commentTargetKey = issueKey;
+            results.push(`${issueKey} → 코멘트만`);
             break;
+          }
         }
 
         // 모든 액션에 코멘트 부착 (있을 때)
-        if (p.comment) {
-          await jira.addComment(p.issueKey, `[회의] ${p.comment}`);
+        if (p.comment && commentTargetKey) {
+          await jira.addComment(commentTargetKey, `[회의] ${p.comment}`);
         }
       } catch (e) {
-        failures.push(`${p.issueKey} (${p.action}): ${e}`);
+        const label = p.issueKey ?? p.summary ?? "새 이슈";
+        failures.push(`${label} (${p.action}): ${e}`);
       }
     }
 
@@ -434,9 +552,9 @@ export async function applyMeetingToBacklog(raw: unknown) {
       ],
     };
   }
-  const rawMessages = await discord.listMessages(threadId, { limit: 100 });
+  const rawMessages = await discord.listAllMessages(threadId, 1000);
   const messages = rawMessages
-    .filter((m) => m.author && !m.author.username.endsWith("[BOT]"))
+    .filter((m) => m.author && !m.author.bot)
     .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
 
   // 백로그 + 스프린트 전체 fetch
@@ -486,7 +604,10 @@ export async function applyMeetingToBacklog(raw: unknown) {
     '      "comment": "..." },',
     '    { "issueKey": "LIU-22", "action": "move_to_sprint", "sprintId": 1, "comment": "..." },',
     '    { "issueKey": "LIU-30", "action": "reopen", "comment": "회의에서 추가 작업 필요로 다시 시작" },',
-    '    { "issueKey": "LIU-42", "action": "comment_only", "comment": "진행 노트" }',
+    '    { "issueKey": "LIU-42", "action": "comment_only", "comment": "진행 노트" },',
+    '    { "action": "create", "summary": "신규 락온 UI 피드백 반영",',
+    '      "dueDate": "2026-05-20", "assigneeName": "김민수",',
+    '      "comment": "회의에서 새 작업으로 확인됨" }',
     "  ]",
     "}",
     "```",
@@ -498,15 +619,15 @@ export async function applyMeetingToBacklog(raw: unknown) {
     "  - 동일 이슈에 여러 변경이 있으면 여러 proposal로 분할 (예: 담당자+기한 = assign + schedule 2건).",
     "  - `assign` 액션의 assigneeName은 회의에서 **명시적으로 누가 맡기로 했는지** 발화된 경우에만 채울 것.",
     "    누가 맡았는지 회의에 언급이 없으면 assign 액션 자체를 만들지 말 것 (현재 담당자 추정 금지).",
-    "  - **`schedule` 액션에 dueDate를 넣으면 서버가 자동으로 그 마감일에 맞는 스프린트로 이동시킴.**",
+    "  - **`create` 또는 `schedule` 액션에 dueDate를 넣으면 서버가 자동으로 그 마감일에 맞는 스프린트로 이동시킴.**",
     "    별도로 `move_to_sprint` proposal을 만들 필요 없음. dueDate만 정확히 추출하면 됨.",
     "    회의에서 마감일이 언급된 작업은 거의 모두 `schedule` 액션으로 만들어 백로그에서 스프린트로 자동 승격되게 하라.",
     "  - `move_to_sprint`는 마감일 변경 없이 다른 스프린트로 이동시킬 때만 사용 (드문 케이스).",
     "  - 모든 proposal에 가능한 한 `comment`를 포함해 회의 출처를 남겨라 (예: '회의 2026-05-13에서 김XX가 맡기로 함').",
     "  - 완료 상태(Done/완료) 이슈가 회의에서 '다시', '추가', '재작업' 등으로 언급되면 `reopen`.",
-    "  - 백로그에 없는 신규 작업 요청은 proposals에 넣지 말고, 별도로 사용자에게 '신규 이슈 생성이 필요해 보입니다' 보고.",
+    "  - 백로그에 없는 신규 작업 요청은 `create` proposal로 넣어라. `summary`는 Jira 이슈 제목, `dueDate`가 있으면 일정 적용 + 스프린트 자동 배정까지 수행된다.",
     "",
-    "재호출 시 Phase 2가 실행되어 Discord 정리 스레드에 미리보기를 게시하고 ✅ reaction을 대기한다.",
+    "재호출 시 Phase 2가 실행되어 Discord 정리 스레드에 미리보기를 게시하고 PM/팀장의 텍스트 확정을 대기한다.",
   ].join("\n");
 
   return { content: [{ type: "text" as const, text }] };

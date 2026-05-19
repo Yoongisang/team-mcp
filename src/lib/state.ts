@@ -11,9 +11,12 @@ export interface PendingConfirmation {
   index: number;       // 1-based, Discord 메시지에서 사용자가 입력할 번호
   itemText: string;    // 체크리스트 항목 텍스트
   commitSubject: string; // 매칭된 커밋 제목
+  commitHash?: string;
+  confidence?: "high" | "partial";
 }
 
 export type BacklogProposalAction =
+  | "create"
   | "assign"
   | "schedule"
   | "move_to_sprint"
@@ -21,8 +24,11 @@ export type BacklogProposalAction =
   | "reopen";
 
 export interface BacklogProposal {
-  issueKey: string;
+  issueKey?: string;
   action: BacklogProposalAction;
+  summary?: string;
+  issueType?: string;
+  labels?: string[];
   assigneeName?: string;    // 표시 이름 (예: "김민수"). MCP가 accountId 조회
   startDate?: string;       // YYYY-MM-DD
   dueDate?: string;         // YYYY-MM-DD

@@ -38,6 +38,21 @@ export async function completeTask(raw: unknown) {
     );
   }
 
+  if (matches.length > 1) {
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text:
+            `"${task_name}"에 매칭되는 미완료 항목이 ${matches.length}개입니다. 체크리스트는 변경하지 않았습니다.\n` +
+            "더 구체적인 항목명으로 다시 호출하세요.\n\n" +
+            matches.map((m) => `  - ${m.text}`).join("\n"),
+        },
+      ],
+      isError: true,
+    };
+  }
+
   const target = matches[0]!;
   const updatedLines = setItemDone(lines, target, true);
   await writeGameFile(GAME_FILES.checklist, joinLines(updatedLines), {
@@ -54,18 +69,12 @@ export async function completeTask(raw: unknown) {
   const nextItems = incomplete.filter((i) => i.lineIndex !== target.lineIndex);
   const nextSuggestion = nextItems[0]?.text ?? "(전체 완료)";
 
-  const ambiguity =
-    matches.length > 1
-      ? `\n주의: "${task_name}" 으로 ${matches.length}개 매칭됨. 첫 번째 항목만 처리. 다른 항목은 더 명확한 이름으로 호출하라.\n매칭 후보:\n${matches.map((m) => `  - ${m.text}`).join("\n")}`
-      : "";
-
   return {
     content: [
       {
         type: "text" as const,
         text:
-          `완료 처리: ${target.text}\n다음 작업 추천: ${nextSuggestion}` +
-          ambiguity,
+          `완료 처리: ${target.text}\n다음 작업 추천: ${nextSuggestion}`,
       },
     ],
   };

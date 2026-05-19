@@ -115,9 +115,9 @@ export async function finishMeeting(raw: unknown) {
   const threadId = state.currentMeetingThreadId;
 
   // 스레드의 모든 댓글 수집 (스레드 자체도 채널이라 listMessages 사용 가능)
-  const raw_messages = await discord.listMessages(threadId, { limit: 100 });
+  const raw_messages = await discord.listAllMessages(threadId, 1000);
   const messages = raw_messages
-    .filter((m) => m.author && !m.author.username.endsWith("[BOT]"))
+    .filter((m) => m.author && !m.author.bot)
     .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
 
   // ── 확인 대기 항목 처리 ────────────────────────────────────────────────
@@ -125,10 +125,14 @@ export async function finishMeeting(raw: unknown) {
   const confirmedItems: string[] = [];
 
   if (pending.length > 0 && messages.length > 0) {
-    // 사용자 메시지에서 확인 번호 파싱 (예: "1 2", "1번 3번", "1,2,3")
+    // 사용자 메시지에서 명시적인 확인 번호만 파싱.
+    // 일반 회의 발화의 숫자(이슈 번호, 날짜 등)는 체크리스트 완료 근거로 쓰지 않는다.
     const confirmedIndexes = new Set<number>();
     for (const msg of messages) {
-      const nums = [...msg.content.matchAll(/\b(\d+)번?\b/g)].map(m => parseInt(m[1]!, 10));
+      if (!/(confirmed_indexes|완료\s*번호|완료된\s*항목)/i.test(msg.content)) {
+        continue;
+      }
+      const nums = [...msg.content.matchAll(/\b(\d+)\b/g)].map(m => parseInt(m[1]!, 10));
       nums.forEach(n => confirmedIndexes.add(n));
     }
 

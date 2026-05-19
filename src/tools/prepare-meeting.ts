@@ -9,8 +9,6 @@ import {
   progress,
   setItemDone,
   joinLines,
-  appendCheckedItems,
-  type ChecklistItem,
 } from "../lib/markdown.js";
 import { loadState, saveState, type PendingConfirmation } from "../lib/state.js";
 import type { Commit } from "../lib/git.js";
@@ -116,43 +114,39 @@ function matchesCommit(itemText: string, commit: Commit): boolean {
 }
 
 interface AutoCompleteResult {
-  completed: ChecklistItem[];
-  pending: PendingConfirmation[];
+  proposals: PendingConfirmation[];
   /**
    * 체크리스트의 어떤 항목과도 매칭되지 않은 커밋들 (none-매칭).
-   * 사용자 요청: 이 커밋들은 새 항목으로 추가 + 체크 처리 대상.
-   * 호출자가 confirmed_indexes 처리 후 별도로 추가 적용함.
+   * 파일에는 자동 반영하지 않고 보고서에 후보로만 노출한다.
    */
   orphanCommits: Commit[];
 }
 
 /**
- * 커밋 목록을 체크리스트 항목과 매칭해 자동완료 처리.
- * - 고신뢰 매칭 → 즉시 [x] 처리
- * - 부분 매칭 → 사용자 확인 대기 목록에 추가
+ * 커밋 목록을 체크리스트 항목과 매칭해 완료 후보를 만든다.
+ * - 고신뢰 매칭도 즉시 [x] 처리하지 않고 사용자 확인을 기다린다.
+ * - 부분 매칭도 사용자 확인 대기 목록에 추가한다.
  * - 어떤 항목과도 매칭 안 됨(none) → orphanCommits 반환
  */
 async function autoCompleteFromCommits(
   commits: Commit[],
 ): Promise<AutoCompleteResult> {
   if (commits.length === 0)
-    return { completed: [], pending: [], orphanCommits: [] };
+    return { proposals: [], orphanCommits: [] };
   if (!(await gameFileExists(GAME_FILES.checklist)))
-    return { completed: [], pending: [], orphanCommits: [] };
+    return { proposals: [], orphanCommits: [] };
 
   const raw = await readGameFile(GAME_FILES.checklist);
-  const { items, lines } = parseChecklist(raw);
+  const { items } = parseChecklist(raw);
   const incomplete = items.filter(i => !i.done);
 
   // 체크리스트에 미완료 항목이 없으면 모든 커밋이 orphan 후보
-  // (단, 진행률 측면에서는 이미 다 끝난 상태라 추가 의미는 없지만 사용자가 원하니 추가)
+  // (단, 파일에는 자동 추가하지 않는다.)
   if (incomplete.length === 0) {
-    return { completed: [], pending: [], orphanCommits: [...commits] };
+    return { proposals: [], orphanCommits: [...commits] };
   }
 
-  const completed: ChecklistItem[] = [];
-  const pending: PendingConfirmation[] = [];
-  let updatedLines = lines;
+  const proposals: PendingConfirmation[] = [];
   let pendingIndex = 1;
 
   // 각 커밋이 어떤 항목과도 매칭(high/partial) 안 됐는지 추적
@@ -173,44 +167,28 @@ async function autoCompleteFromCommits(
     }
 
     if (bestConfidence === "high") {
-      completed.push(item);
-      updatedLines = setItemDone(updatedLines, item, true);
+      proposals.push({
+        index: pendingIndex++,
+        itemText: item.text,
+        commitSubject: bestCommit?.subject ?? "",
+        commitHash: bestCommit?.hash,
+        confidence: "high",
+      });
     } else if (bestConfidence === "partial" && bestCommit) {
-      pending.push({
+      proposals.push({
         index: pendingIndex++,
         itemText: item.text,
         commitSubject: bestCommit.subject,
+        commitHash: bestCommit.hash,
+        confidence: "partial",
       });
     }
-  }
-
-  if (completed.length > 0) {
-    await writeGameFile(GAME_FILES.checklist, joinLines(updatedLines), { overwrite: true });
   }
 
   // orphan: 어떤 항목과도 매칭(high/partial) 안 된 커밋
   const orphanCommits = commits.filter(c => !matchedCommitHashes.has(c.hash));
 
-  return { completed, pending, orphanCommits };
-}
-
-/**
- * orphan 커밋들의 subject를 체크리스트에 새 [x] 항목으로 추가.
- * 마지막 체크된 항목 바로 다음에 삽입.
- */
-async function appendOrphanCommitsToChecklist(
-  orphans: Commit[],
-): Promise<string[]> {
-  if (orphans.length === 0) return [];
-  if (!(await gameFileExists(GAME_FILES.checklist))) return [];
-
-  const raw = await readGameFile(GAME_FILES.checklist);
-  const parsed = parseChecklist(raw);
-  const texts = orphans.map(c => c.subject);
-  const { lines, insertedCount } = appendCheckedItems(parsed, texts);
-  if (insertedCount === 0) return [];
-  await writeGameFile(GAME_FILES.checklist, joinLines(lines), { overwrite: true });
-  return texts;
+  return { proposals, orphanCommits };
 }
 
 export async function prepareMeeting(raw: unknown) {
@@ -240,6 +218,7 @@ export async function prepareMeeting(raw: unknown) {
   );
 
   // ── 2차 호출: confirmed_indexes로 pending 확인 처리 ──────────────────
+  const confirmedItems: string[] = [];
   if (confirmed_indexes !== undefined) {
     const pending = state.pendingConfirmations ?? [];
     if (pending.length > 0 && confirmed_indexes.length > 0) {
@@ -249,23 +228,30 @@ export async function prepareMeeting(raw: unknown) {
       for (const p of pending) {
         if (!confirmed_indexes.includes(p.index)) continue;
         const target = items.find(i => !i.done && i.text === p.itemText);
-        if (target) updatedLines = setItemDone(updatedLines, target, true);
+        if (target) {
+          updatedLines = setItemDone(updatedLines, target, true);
+          confirmedItems.push(target.text);
+          state.completions.push({
+            task: target.text,
+            completedAt: new Date().toISOString(),
+          });
+        }
       }
-      await writeGameFile(GAME_FILES.checklist, joinLines(updatedLines), { overwrite: true });
+      if (confirmedItems.length > 0) {
+        await writeGameFile(GAME_FILES.checklist, joinLines(updatedLines), { overwrite: true });
+      }
     }
     state.pendingConfirmations = [];
     await saveState(state);
   }
 
-  // ── 체크리스트 자동완료 (고신뢰) + 부분 매칭 탐지 + orphan 식별 ──────
+  // ── 체크리스트 완료 후보 + orphan 식별 (자동 반영 없음) ───────────────
   const {
-    completed: autoCompleted,
-    pending: newPending,
+    proposals: newPending,
     orphanCommits,
   } = await autoCompleteFromCommits(commits);
 
-  // ── 1차 호출이고 부분 매칭 항목이 있으면 → Discord 포스트 전에 질문 반환
-  //    (orphan 처리는 사용자 확인 후로 미룸 — 체크리스트 일관성 유지)
+  // ── 1차 호출이고 완료 후보가 있으면 → Discord 포스트 전에 질문 반환
   if (confirmed_indexes === undefined && newPending.length > 0) {
     state.pendingConfirmations = newPending;
     await saveState(state);
@@ -273,7 +259,7 @@ export async function prepareMeeting(raw: unknown) {
     const lines = [
       "다음 항목들이 이번 커밋으로 완료된 작업과 같은가요?\n",
       ...newPending.map(p =>
-        `**${p.index}.** ${p.itemText}\n   ← \`${p.commitSubject}\``
+        `**${p.index}.** ${p.itemText} (${p.confidence ?? "partial"})\n   ← \`${p.commitSubject}\``
       ),
       "\n완료된 항목 번호를 `confirmed_indexes`에 담아 다시 호출해주세요.",
       "없으면 빈 배열 `[]`로 호출하면 Discord 포스트로 진행합니다.",
@@ -284,9 +270,7 @@ export async function prepareMeeting(raw: unknown) {
     };
   }
 
-  // ── orphan 커밋을 체크리스트에 새 [x] 항목으로 추가 ────────────────
-  // (1차 호출에서 partial 없는 경우 + 2차 호출 모두 여기 도달)
-  const addedItems = await appendOrphanCommitsToChecklist(orphanCommits);
+  const orphanSubjects = orphanCommits.map((c) => c.subject);
 
   // ── 진행률 계산 ──────────────────────────────────────────────────────
   let progressLine = "(체크리스트 없음)";
@@ -327,15 +311,23 @@ export async function prepareMeeting(raw: unknown) {
         return ls.join("\n");
       }).join("\n");
 
-  const autoCompleteBlock = autoCompleted.length > 0
-    ? ["", "### ✅ 자동 완료 처리", autoCompleted.map(i => `- [x] ${i.text}`).join("\n")].join("\n")
+  const confirmedBlock = confirmedItems.length > 0
+    ? ["", "### ✅ 확인 후 완료 처리", confirmedItems.map(t => `- [x] ${t}`).join("\n")].join("\n")
     : "";
 
-  const addedBlock = addedItems.length > 0
+  const pendingBlock = newPending.length > 0
     ? [
         "",
-        "### ➕ 체크리스트 신규 추가 (체크리스트에 없던 커밋 → 자동 추가 + 완료 처리)",
-        addedItems.map(t => `- [x] ${t}`).join("\n"),
+        "### ⚠️ 완료 후보 (확인 전, 미반영)",
+        newPending.map(p => `- [ ] ${p.itemText} ← ${p.commitSubject}`).join("\n"),
+      ].join("\n")
+    : "";
+
+  const orphanBlock = orphanSubjects.length > 0
+    ? [
+        "",
+        "### ➕ 체크리스트에 없는 커밋 후보 (자동 추가 안 함)",
+        orphanSubjects.map(t => `- ${t}`).join("\n"),
       ].join("\n")
     : "";
 
@@ -345,8 +337,9 @@ export async function prepareMeeting(raw: unknown) {
     "",
     "### 최근 커밋",
     commitsBlock,
-    autoCompleteBlock,
-    addedBlock,
+    confirmedBlock,
+    pendingBlock,
+    orphanBlock,
     "",
     "### 진행 상황",
     progressLine,
@@ -418,8 +411,9 @@ export async function prepareMeeting(raw: unknown) {
         `  포럼: ${forumId}\n` +
         `  스레드: ${threadId}\n` +
         `  ${isNewThread ? `태그: [${config.discord.tagInProgress}]\n  ` : ""}추가 메시지: ${followupCount}건\n` +
-        `  자동완료: ${autoCompleted.length > 0 ? autoCompleted.map(i => i.text).join(", ") : "없음"}\n` +
-        `  신규 추가: ${addedItems.length > 0 ? addedItems.join(", ") : "없음"}\n\n` +
+        `  확인 후 완료: ${confirmedItems.length > 0 ? confirmedItems.join(", ") : "없음"}\n` +
+        `  미반영 완료 후보: ${newPending.length > 0 ? newPending.map(i => i.itemText).join(", ") : "없음"}\n` +
+        `  체크리스트 없는 커밋 후보: ${orphanSubjects.length > 0 ? orphanSubjects.join(", ") : "없음"}\n\n` +
         `이제 스크럼은 위 스레드의 댓글로 진행하세요. 회의가 끝나면 finish_meeting을 호출하면 됩니다.`,
     }],
   };
