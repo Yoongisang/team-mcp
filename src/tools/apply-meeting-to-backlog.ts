@@ -458,13 +458,15 @@ export async function applyMeetingToBacklog(raw: unknown) {
   const issues = await jira.listAllIssues(jiraProject);
 
   // 컨텍스트 텍스트 빌드
+  // 의도적으로 현재 담당자(`@assigneeName`)는 표시하지 않음 —
+  // 회의 액션 아이템과 백로그 이슈 매칭은 **작업 내용(summary)** 만을 근거로 해야 함.
+  // 기존 담당자가 누구인지가 매칭 신호로 들어가면 "X가 작업 중인 항목" 식의 편향이 생김.
   const issueLines = issues
     .map((i) => {
       const sprintTag = i.sprintName ? ` [SP:${i.sprintName}]` : " [Backlog]";
       const epicTag = i.parentKey ? ` (Epic:${i.parentKey})` : "";
-      const assignTag = i.assigneeName ? ` @${i.assigneeName}` : "";
       const dueTag = i.dueDate ? ` due:${i.dueDate}` : "";
-      return `${i.key} [${i.status}]${sprintTag}${epicTag}${assignTag}${dueTag} — ${i.summary}`;
+      return `${i.key} [${i.status}]${sprintTag}${epicTag}${dueTag} — ${i.summary}`;
     })
     .join("\n");
 
@@ -478,7 +480,8 @@ export async function applyMeetingToBacklog(raw: unknown) {
     `_스레드: ${threadId}, 댓글 ${messages.length}건, 백로그 ${issues.length}건._`,
     "",
     "## Jira 이슈 전체 (백로그 + 스프린트)",
-    "포맷: `KEY [상태] [SP:스프린트 또는 Backlog] (Epic:부모) @담당자 due:기한 — 요약`",
+    "포맷: `KEY [상태] [SP:스프린트 또는 Backlog] (Epic:부모) due:기한 — 요약`",
+    "_현재 담당자 정보는 의도적으로 표시되지 않음 — 매칭은 오직 작업 내용(summary)으로만 판단._",
     "",
     issueLines || "(이슈 없음)",
     "",
@@ -504,8 +507,12 @@ export async function applyMeetingToBacklog(raw: unknown) {
     "```",
     "",
     "분석 가이드:",
+    "  - **매칭 기준은 작업 내용(summary)뿐.** 누가 현재 그 이슈 담당이든, 누가 회의에서 발화했든 매칭 신호로 쓰지 말 것.",
+    "    예) 회의에서 '락온 컴포넌트 끝났음'이라고 했으면 → summary에 '락온/LockOn' 키워드 있는 이슈를 매칭. 발화자 ≠ 담당자여도 매칭 성립.",
     "  - 회의에서 명확히 언급된 작업만 매칭하라. 모호하면 제외.",
     "  - 동일 이슈에 여러 변경이 있으면 여러 proposal로 분할 (예: 담당자+기한 = assign + schedule 2건).",
+    "  - `assign` 액션의 assigneeName은 회의에서 **명시적으로 누가 맡기로 했는지** 발화된 경우에만 채울 것.",
+    "    누가 맡았는지 회의에 언급이 없으면 assign 액션 자체를 만들지 말 것 (현재 담당자 추정 금지).",
     "  - 모든 proposal에 가능한 한 `comment`를 포함해 회의 출처를 남겨라 (예: '회의 2026-05-13에서 김XX가 맡기로 함').",
     "  - 완료 상태(Done/완료) 이슈가 회의에서 '다시', '추가', '재작업' 등으로 언급되면 `reopen`.",
     "  - 백로그에 없는 신규 작업 요청은 proposals에 넣지 말고, 별도로 사용자에게 '신규 이슈 생성이 필요해 보입니다' 보고.",
