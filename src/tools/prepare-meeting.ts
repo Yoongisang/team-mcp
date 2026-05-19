@@ -1,7 +1,7 @@
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { config, requireConfig } from "../config.js";
-import { DiscordClient, resolveForumTagIds } from "../lib/discord.js";
+import { DiscordClient, resolveForumTagIds, type DiscordThread } from "../lib/discord.js";
 import { GAME_FILES, gameFileExists, readGameFile, writeGameFile } from "../lib/files.js";
 import { gitLog, gitShowDetails } from "../lib/git.js";
 import {
@@ -352,21 +352,52 @@ export async function prepareMeeting(raw: unknown) {
     progressLine,
   ].join("\n");
 
-  // ── Discord 포스트 (스레드 재사용 or 신규 생성) ───────────────────────
+  // ── Discord 포스트 (활성 [진행] 스레드 재사용 or 신규 생성) ───────────
+  //
+  // 우선순위:
+  //   1) Discord 포럼의 활성 [진행] 스레드 자동 탐색 (팀원 누가 만든 것이든)
+  //   2) 검색 실패 시: 로컬 state.currentMeetingThreadId 폴백
+  //   3) 둘 다 없으면: 신규 스레드 생성
+  //
+  // 변경 의도:
+  //   기존엔 state.currentMeetingThreadId만 봐서, 팀원마다 로컬 state가
+  //   분리된 환경에서는 각자 별도 스레드를 생성하는 문제가 있었음.
+  //   Discord 포럼을 source-of-truth로 삼아 같은 [진행] 스레드에 수렴.
   const client = new DiscordClient(token);
   const today = new Date().toISOString().slice(0, 10);
+  const forum = await client.getChannel(forumId);
+  const [inProgressTagId] = resolveForumTagIds(forum, [config.discord.tagInProgress]);
+
   let threadId: string;
   let isNewThread: boolean;
   let followupCount = 0;
 
-  if (state.currentMeetingThreadId) {
+  // 1) 포럼에서 활성 [진행] 스레드 탐색 (실패해도 다음 단계로 넘어감)
+  let existingThread: DiscordThread | undefined;
+  try {
+    const activeThreads = await client.listActiveForumThreads(forumId);
+    existingThread = activeThreads
+      .filter((t) => t.applied_tags?.includes(inProgressTagId!))
+      .sort((a, b) => b.id.localeCompare(a.id))[0]; // snowflake 내림차순 = 가장 최근
+  } catch (err) {
+    // 활성 스레드 조회 실패는 치명적 아님 — 폴백 경로로 계속
+    console.error("[prepare_meeting] listActiveForumThreads failed:", err);
+  }
+
+  if (existingThread) {
+    // 1) 활성 [진행] 스레드 발견 → 본인 보고를 댓글로 추가
+    threadId = existingThread.id;
+    isNewThread = false;
+    const msgIds = await client.postChunked(threadId, report);
+    followupCount = msgIds.length;
+  } else if (state.currentMeetingThreadId) {
+    // 2) Discord 검색 실패 시 로컬 state 폴백
     threadId = state.currentMeetingThreadId;
     isNewThread = false;
     const msgIds = await client.postChunked(threadId, report);
     followupCount = msgIds.length;
   } else {
-    const forum = await client.getChannel(forumId);
-    const [inProgressTagId] = resolveForumTagIds(forum, [config.discord.tagInProgress]);
+    // 3) 활성 스레드 없음 → 새로 생성
     const { thread, followupMessageIds } = await client.createForumThread(
       forumId, `스크럼 회의 ${today}`, report, [inProgressTagId!],
     );

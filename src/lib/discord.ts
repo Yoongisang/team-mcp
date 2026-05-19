@@ -23,6 +23,7 @@ export interface DiscordChannel {
   type: number;
   name?: string;
   parent_id?: string | null;
+  guild_id?: string;
   applied_tags?: string[];
   available_tags?: ForumTag[];
 }
@@ -152,6 +153,29 @@ export class DiscordClient {
       followupMessageIds.push(m.id);
     }
     return { thread, followupMessageIds };
+  }
+
+  /**
+   * 길드 내 활성 스레드 목록을 조회한 뒤, 지정한 forumId를 parent로 가지는 것만 반환.
+   * `prepare_meeting`에서 팀원 간 활성 [진행] 스레드를 찾기 위해 사용.
+   *
+   * Discord API: GET /guilds/{guild.id}/threads/active
+   *   응답: { threads: Thread[], members: ThreadMember[] }
+   *   봇이 접근 권한 있는 모든 활성 스레드를 반환.
+   */
+  async listActiveForumThreads(forumId: string): Promise<DiscordThread[]> {
+    const forum = await this.getChannel(forumId);
+    if (!forum.guild_id) {
+      throw new Error(
+        `포럼 채널 ${forumId}의 guild_id를 확인할 수 없어 활성 스레드 조회 불가.`,
+      );
+    }
+    const res = await this.request(
+      "GET",
+      `/guilds/${forum.guild_id}/threads/active`,
+    );
+    const data = (await res.json()) as { threads: DiscordThread[] };
+    return (data.threads ?? []).filter((t) => t.parent_id === forumId);
   }
 
   /**
