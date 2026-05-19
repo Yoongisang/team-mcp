@@ -40,7 +40,9 @@ export class JiraClient {
         `Jira API ${res.status} ${res.statusText}: ${body.slice(0, 300)}`,
       );
     }
-    return await res.json();
+    const text = await res.text();
+    if (!text) return null;
+    return JSON.parse(text);
   }
 
   /**
