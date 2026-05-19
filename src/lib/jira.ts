@@ -181,7 +181,9 @@ export class JiraClient {
 
   async searchIssues(jql: string): Promise<Array<{ key: string; summary: string }>> {
     try {
-      const data = (await this.request("/rest/api/3/issue/search", {
+      // Jira 2024 migration: /rest/api/3/search → /rest/api/3/search/jql
+      // 페이지네이션은 nextPageToken 기반으로 변경됐지만, 본 메서드는 maxResults 50으로 단발성 검색이라 무시.
+      const data = (await this.request("/rest/api/3/search/jql", {
         method: "POST",
         body: { jql, fields: ["summary", "status"], maxResults: 50 },
       })) as { issues?: Array<{ key: string; fields: { summary: string } }> };
@@ -279,23 +281,28 @@ export class JiraClient {
       "customfield_10020", // sprint (Jira Software 표준)
     ];
     const results: Array<Awaited<ReturnType<typeof this.listAllIssues>>[number]> = [];
-    let startAt = 0;
+    // Jira 2024 migration: /rest/api/3/search (startAt 기반) → /rest/api/3/search/jql (nextPageToken 기반)
+    // 응답에서 total 필드가 사라지고 isLast / nextPageToken으로 종료 판정
+    let nextPageToken: string | undefined = undefined;
+    let totalFetched = 0;
     const maxResults = 100;
     while (true) {
-      const data = (await this.request("/rest/api/3/search", {
+      const body: Record<string, unknown> = {
+        jql: `project = "${projectKey}" ORDER BY created ASC`,
+        fields,
+        maxResults,
+      };
+      if (nextPageToken) body.nextPageToken = nextPageToken;
+      const data = (await this.request("/rest/api/3/search/jql", {
         method: "POST",
-        body: {
-          jql: `project = "${projectKey}" ORDER BY created ASC`,
-          fields,
-          startAt,
-          maxResults,
-        },
+        body,
       })) as {
         issues?: Array<{
           key: string;
           fields: Record<string, unknown>;
         }>;
-        total?: number;
+        nextPageToken?: string;
+        isLast?: boolean;
       };
       const issues = data.issues ?? [];
       for (const i of issues) {
@@ -329,9 +336,14 @@ export class JiraClient {
           sprintName: activeSprint?.name ?? null,
         });
       }
-      if (issues.length < maxResults) break;
-      startAt += maxResults;
-      if (startAt > 1000) break; // 안전장치
+      totalFetched += issues.length;
+      // 종료 조건:
+      //  1) isLast=true (Atlassian이 마지막 페이지임을 명시)
+      //  2) nextPageToken이 없음 (더 이상 페이지 없음)
+      //  3) 안전장치 — 1000개 초과
+      if (data.isLast || !data.nextPageToken) break;
+      if (totalFetched > 1000) break;
+      nextPageToken = data.nextPageToken;
     }
     return results;
   }
