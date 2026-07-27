@@ -8,7 +8,7 @@
 ## 레포 개요
 
 `team-mcp`는 UE5 팀 프로젝트용 MCP 서버다. 게임 레포와 분리된 독립 레포로,
-Claude Code · Codex · Cursor 어디서든 동일하게 동작하는 8개 툴을 노출한다.
+Claude Code · Codex · Cursor 어디서든 동일하게 동작하는 9개 툴을 노출한다.
 
 | 파일 | 역할 |
 |---|---|
@@ -56,7 +56,8 @@ MCP 연결 확인 후 기획서와 내 파트가 게임 레포에 없으면 아�
 Channels 플러그인을 통해 Discord 메시지가 컨텍스트로 들어온 경우:
 
 - `prepare_meeting`의 `user_name`: 메시지 작성자의 Discord 표시 이름(또는 username) 그대로 사용.
-  Discord 보고자 표시에만 사용하며, 커밋은 `GAME_PROJECT_PATH` 현재 브랜치의 upstream에 push된 내역 전체를 기준으로 수집한다.
+  Discord 보고자 표시와 Git 작성자 매칭에 사용한다. 이름이 다르면 `GIT_AUTHOR_MAP`을 사용하거나 `git_author`를 명시한다.
+  커밋은 `GIT_REPORT_REF`(기본 `origin/develop`)에 반영된 것 중 해당 작성자의 내역만 수집한다.
 - `finish_meeting`의 `invoker_id`: 메시지 작성자의 Discord **user ID(snowflake, 긴 숫자)** 를 그대로 사용.
   절대 username을 넣지 말 것 (`ALLOWED_USERS`는 ID 기반 검증).
 - 메시지 메타데이터에 ID가 명시적으로 보이지 않으면, 작업을 시도하지 말고 먼저 작성자 ID를 묻는다.
@@ -67,7 +68,7 @@ Channels 플러그인을 통해 Discord 메시지가 컨텍스트로 들어온 �
 
 `DISCORD_SCRUM_CHANNEL_ID`는 **포럼 채널**을 가리킨다. 포럼에 `진행`, `완료`, `정리` 세 태그가 있어야 한다.
 
-1. **prepare_meeting** (1차) → 커밋 상세 컨텍스트 반환 → AI가 사람이 읽기 좋은 변경 요약 작성
+1. **prepare_meeting** (1차) → 회의 준비자의 Git 작성자 커밋만 수집 → AI가 사람이 읽기 좋은 변경 요약 작성
 2. **prepare_meeting** (`commit_summary_markdown`으로 재호출) →
    - 오늘 날짜의 가장 최근 `[진행]` 스레드가 있으면 댓글로 보고 추가
    - 없으면 그날의 다음 회차로 새 스레드 생성 (제목: `스크럼 회의 YYYY-MM-DD (N차)`)

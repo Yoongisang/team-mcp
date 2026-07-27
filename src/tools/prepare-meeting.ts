@@ -23,7 +23,7 @@ import type { Commit } from "../lib/git.js";
 export const prepareMeetingTool: Tool = {
   name: "prepare_meeting",
   description:
-    "마지막 prepare_meeting 이후의 git 커밋과 체크리스트 진행률을 모아 " +
+    "회의 준비를 요청한 사람의 Git 작성자 커밋과 개인 체크리스트 진행률을 모아 " +
     "커밋 검토용 컨텍스트를 먼저 반환하고, 사람이 읽기 좋은 요약을 받은 뒤 " +
     "오늘 날짜의 가장 최근 [진행] 회의 스레드에 게시한다. 해당 스레드가 없으면 " +
     "오늘 회차를 계산해 새 회의 스레드를 생성한다. " +
@@ -36,8 +36,14 @@ export const prepareMeetingTool: Tool = {
       user_name: {
         type: "string",
         description:
-          "Discord에 표시할 스크럼 보고자 이름. 커밋 필터에는 사용하지 않는다. " +
+          "Discord에 표시할 스크럼 보고자 이름이자 기본 Git 작성자 매칭값. " +
           "Discord 메시지로 트리거된 경우 메시지 작성자의 표시 이름을 그대로 전달.",
+      },
+      git_author: {
+        type: "string",
+        description:
+          "Discord 이름과 Git author가 다를 때 사용할 Git 작성자 이름 또는 이메일. " +
+          "생략하면 GIT_AUTHOR_MAP을 확인한 뒤 user_name을 사용한다.",
       },
       confirmed_indexes: {
         type: "array",
@@ -60,9 +66,25 @@ export const prepareMeetingTool: Tool = {
 
 const Args = z.object({
   user_name: z.string().min(1),
+  git_author: z.string().min(1).optional(),
   confirmed_indexes: z.array(z.number()).optional(),
   commit_summary_markdown: z.string().min(1).optional(),
 });
+
+function normalizePersonName(value: string): string {
+  return value
+    .normalize("NFKC")
+    .toLocaleLowerCase("en-US")
+    .replace(/[^\p{L}\p{N}]+/gu, "");
+}
+
+function mappedGitAuthor(userName: string): string | undefined {
+  const target = normalizePersonName(userName);
+  const match = Object.entries(config.git.authorMap).find(
+    ([discordName]) => normalizePersonName(discordName) === target,
+  );
+  return match?.[1]?.trim();
+}
 
 // ── 체크리스트 자동완료 ────────────────────────────────────────────────────
 
@@ -212,6 +234,7 @@ function renderCommitReviewContext(
   gitSource: {
     branch: string;
     upstream: string;
+    reportAuthor: string;
     previousReportedHead: string | null;
     unpushedCount: number;
   },
@@ -241,7 +264,8 @@ function renderCommitReviewContext(
   return [
     "# 스크럼 커밋 요약 작성 컨텍스트",
     `- 보고자: ${userName}`,
-    `- Git 기준: ${gitSource.branch} → ${gitSource.upstream}에 반영된 커밋`,
+    `- Git 작성자: ${gitSource.reportAuthor}`,
+    `- Git 기준: ${gitSource.upstream}에 반영된 개인 커밋`,
     `- 기간: ${period}`,
     `- 커밋 수: ${commits.length}`,
     `- push되지 않아 제외된 로컬 커밋: ${gitSource.unpushedCount}`,
@@ -262,8 +286,12 @@ function renderCommitReviewContext(
 }
 
 export async function prepareMeeting(raw: unknown) {
-  const { user_name, confirmed_indexes, commit_summary_markdown } =
-    Args.parse(raw);
+  const {
+    user_name,
+    git_author,
+    confirmed_indexes,
+    commit_summary_markdown,
+  } = Args.parse(raw);
   const token = requireConfig(config.discord.botToken, "DISCORD_BOT_TOKEN");
   const forumId = requireConfig(
     config.discord.scrumChannelId,
@@ -271,13 +299,39 @@ export async function prepareMeeting(raw: unknown) {
   );
 
   const state = await loadState();
+  const configuredAuthor = mappedGitAuthor(user_name);
+  const reportAuthor = git_author?.trim() || configuredAuthor || user_name;
 
-  // ── 게임 레포의 현재 upstream에 push된 커밋 수집 ────────────────────
+  // ── 보고 기준 ref에서 회의 준비자의 개인 커밋만 수집 ───────────────
   const pushedLog = await gitPushedLog({
+    author: reportAuthor,
+    ref: config.git.reportRef,
     lastReportedHeads: state.lastReportedUpstreamHeads,
     limit: 200,
   });
   const baseCommits = pushedLog.commits;
+
+  if (!pushedLog.authorKnown) {
+    const candidates = pushedLog.availableAuthors.slice(0, 30);
+    const more = pushedLog.availableAuthors.length - candidates.length;
+    const text = [
+      "# Git 작성자 매칭 필요",
+      `Discord 보고자 \`${user_name}\`와 일치하는 Git author를 \`${pushedLog.upstream}\`에서 찾지 못했습니다.`,
+      "다른 팀원의 커밋을 대신 게시하지 않았습니다.",
+      "",
+      "다음 중 하나로 다시 호출하세요:",
+      `- prepare_meeting에 \`git_author\` 전달`,
+      `- .env의 GIT_AUTHOR_MAP에 \`{\"${user_name}\":\"Git author 이름 또는 이메일\"}\` 추가`,
+      "",
+      "확인된 Git 작성자 후보:",
+      ...(candidates.length > 0
+        ? candidates.map((candidate) => `- ${candidate}`)
+        : ["- (없음)"]),
+      ...(more > 0 ? [`- 외 ${more}개`] : []),
+    ].join("\n");
+    return { content: [{ type: "text" as const, text }] };
+  }
+
   const detailLimit = 10;
   const commits = await Promise.all(
     baseCommits.map(async (c, i) => {
@@ -399,7 +453,7 @@ export async function prepareMeeting(raw: unknown) {
   const report = [
     `## ${user_name} 스크럼 보고`,
     `_기간: ${periodLabel}_`,
-    `_Git: ${pushedLog.branch} → ${pushedLog.upstream} (push 반영 기준)_`,
+    `_Git: ${pushedLog.upstream} / 작성자 ${pushedLog.reportAuthor}_`,
     "",
     `### 변경 요약 (${commits.length}커밋)`,
     commitSummaryBlock,
@@ -461,7 +515,7 @@ export async function prepareMeeting(raw: unknown) {
   }
 
   state.currentMeetingThreadId = threadId;
-  state.lastReportedUpstreamHeads[pushedLog.upstream] =
+  state.lastReportedUpstreamHeads[pushedLog.trackingKey] =
     pushedLog.upstreamHead;
   state.pendingConfirmations = [];
   await saveState(state);
@@ -473,6 +527,7 @@ export async function prepareMeeting(raw: unknown) {
         `${isNewThread ? "포럼 회의 스레드 생성 완료" : "기존 회의 스레드에 보고 추가 완료"}\n` +
         `  포럼: ${forumId}\n` +
         `  스레드: ${meetingThreadName(today, meetingNumber)} (${threadId})\n` +
+        `  Git 작성자: ${pushedLog.reportAuthor}\n` +
         `  ${isNewThread ? `태그: [${config.discord.tagInProgress}]\n  ` : ""}추가 메시지: ${followupCount}건\n` +
         `  확인 후 완료: ${confirmedItems.length > 0 ? confirmedItems.join(", ") : "없음"}\n` +
         `  미반영 완료 후보: ${newPending.length > 0 ? newPending.map(i => i.itemText).join(", ") : "없음"}\n` +

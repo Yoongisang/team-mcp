@@ -5,7 +5,7 @@ Claude Code, Codex, Cursor에서 같은 방식으로 다루는 로컬 MCP 서버
 
 ## 주요 동작
 
-- 게임 레포의 현재 브랜치 upstream에 push된 커밋만 회의 보고에 포함한다.
+- `origin/develop` 등 지정한 보고 ref에서 회의 준비자의 개인 커밋만 수집한다.
 - 커밋 원문은 AI 검토 컨텍스트로만 사용하고 Discord에는 정리된 요약을 게시한다.
 - 체크리스트 완료는 자동 반영하지 않고 사용자 확인을 거친다.
 - 회의 준비와 완료는 서울 날짜 기준 최신 `[진행]` 스레드를 사용한다.
@@ -17,7 +17,7 @@ Claude Code, Codex, Cursor에서 같은 방식으로 다루는 로컬 MCP 서버
 - Node.js 20 이상
 - Git
 - 로컬에 clone된 게임 레포
-- upstream이 설정된 게임 레포 작업 브랜치
+- `origin/develop` 등 팀이 합의한 Git 보고 기준 ref
 - Discord 포럼 채널과 Bot
 - PM 기능 사용 시 Notion Integration과 Jira API 자격 증명
 
@@ -41,6 +41,8 @@ Copy-Item .env.example .env
 
 ```dotenv
 GAME_PROJECT_PATH=C:\projects\GameProject
+GIT_REPORT_REF=origin/develop
+GIT_AUTHOR_MAP={"Discord닉네임":"GitAuthorName"}
 DISCORD_BOT_TOKEN=
 DISCORD_USER_ID=
 DISCORD_SCRUM_CHANNEL_ID=
@@ -127,7 +129,7 @@ Cursor는 게임 레포의 `.cursor/mcp.json` 또는 사용자 홈의 `~/.cursor
 | `complete_task` | 사용자가 지정한 체크리스트 항목 완료 처리 |
 | `change_direction` | 방향 변경의 영향 분석 |
 | `update_plan` | 플랜과 체크리스트 수정 |
-| `prepare_meeting` | push된 변경을 검토·요약해 오늘의 최신 회의에 게시 |
+| `prepare_meeting` | 회의 준비자의 개인 커밋을 검토·요약해 오늘의 최신 회의에 게시 |
 | `finish_meeting` | 오늘의 최신 회의를 완료하고 Notion 회의록·정리 스레드 생성 |
 | `apply_meeting_to_backlog` | Jira 액션 미리보기, 승인, 신규 발행 및 명시적 기존 이슈 변경 |
 
@@ -136,7 +138,7 @@ Cursor는 게임 레포의 `.cursor/mcp.json` 또는 사용자 홈의 `~/.cursor
 ```text
 prepare_meeting
   -> 체크리스트 완료 후보가 있으면 사용자 확인
-  -> push된 커밋을 AI가 검토하고 요약
+  -> 회의 준비자가 작성하고 보고 ref에 반영된 커밋만 AI가 검토·요약
   -> 오늘의 최신 [진행] 스레드에 게시하거나 새 N차 회의 생성
 
 finish_meeting
@@ -167,21 +169,29 @@ Jira 제안 원칙:
 
 ## Git 수집 기준
 
-`prepare_meeting`은 Discord 닉네임이나 Git author로 필터링하지 않는다.
+`prepare_meeting`은 Discord 보고자를 Git author와 연결해 개인 커밋만 수집한다.
 
-1. `GAME_PROJECT_PATH`의 현재 브랜치와 upstream을 확인한다.
-2. 로컬 상태에 저장된 이전 보고 HEAD부터 현재 upstream HEAD까지 수집한다.
-3. upstream에 없는 로컬 커밋은 제외하고 개수만 표시한다.
-4. 이전 보고 HEAD가 없는 최초 실행은 최근 7일의 upstream 커밋을 수집한다.
+1. `GIT_REPORT_REF`를 조회한다. 기본값은 `origin/develop`이다.
+2. `git_author`, `GIT_AUTHOR_MAP`, `user_name` 순으로 Git 작성자를 결정한다.
+3. 이전 보고 HEAD부터 현재 보고 ref HEAD 사이에서 해당 작성자의 커밋만 수집한다.
+4. 마지막 보고 HEAD는 보고 ref + 작성자별로 독립 저장한다.
+5. 보고 ref에 없는 해당 작성자의 로컬 커밋은 제외하고 개수만 표시한다.
+6. 이전 보고 HEAD가 없는 최초 실행은 최근 7일의 개인 커밋을 수집한다.
 
 ```bash
-git branch --show-current
-git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}'
-git push -u origin <branch-name>
+git fetch
+git rev-parse origin/develop
+git log origin/develop --author="Git author 이름 또는 이메일"
 ```
 
-Git은 커밋이 어느 PC에서 push됐는지 기록하지 않는다. 이 서버에서 말하는
-"push된 커밋"은 현재 PC의 게임 레포가 알고 있는 upstream ref에 포함된 커밋이다.
+Discord 표시명과 Git author가 다르면 `.env`에 매핑한다.
+
+```dotenv
+GIT_AUTHOR_MAP={"윤기상":"Yoongisang"}
+```
+
+작성자를 찾지 못하면 다른 팀원의 커밋을 대신 게시하지 않고 후보 Git 작성자를
+반환한다. 이때 `git_author`를 명시해 재호출하거나 매핑을 추가한다.
 
 ## 게임 레포 파일
 
@@ -194,7 +204,7 @@ MCP는 `GAME_PROJECT_PATH` 아래의 다음 파일을 사용한다.
 - `체크리스트.md`
 - `.scrum-state.json`
 
-`.scrum-state.json`에는 로컬 회의 상태와 마지막 보고 upstream HEAD가 들어간다.
+`.scrum-state.json`에는 로컬 회의 상태와 작성자별 마지막 보고 HEAD가 들어간다.
 게임 레포의 `.gitignore`에 추가하고, 백로그 미리보기를 만든 PM과 확정하는 PM은
 같은 MCP 환경을 사용하는 것이 안전하다.
 

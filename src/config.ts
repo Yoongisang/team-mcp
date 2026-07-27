@@ -13,6 +13,31 @@ export const config = {
   get gameProjectPath() {
     return env("GAME_PROJECT_PATH");
   },
+  git: {
+    get reportRef() {
+      return env("GIT_REPORT_REF") || "origin/develop";
+    },
+    get authorMap(): Record<string, string> {
+      const raw = env("GIT_AUTHOR_MAP").trim();
+      if (!raw) return {};
+      try {
+        const parsed = JSON.parse(raw) as unknown;
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          throw new Error("JSON object가 아님");
+        }
+        return Object.fromEntries(
+          Object.entries(parsed).filter(
+            (entry): entry is [string, string] =>
+              typeof entry[1] === "string" && entry[1].trim().length > 0,
+          ),
+        );
+      } catch (error) {
+        throw new Error(
+          `GIT_AUTHOR_MAP은 {"Discord 이름":"Git author"} 형식의 JSON이어야 합니다: ${error}`,
+        );
+      }
+    },
+  },
   discord: {
     get botToken() {
       return env("DISCORD_BOT_TOKEN");

@@ -7,6 +7,8 @@ const exec = promisify(execFile);
 export interface Commit {
   hash: string;
   date: string;
+  authorName: string;
+  authorEmail: string;
   subject: string;
   body?: string;
   filesChanged?: number;
@@ -21,7 +23,55 @@ export interface PushedCommitLog {
   upstream: string;
   upstreamHead: string;
   previousReportedHead: string | null;
+  reportAuthor: string;
+  trackingKey: string;
+  totalCommitCount: number;
+  authorKnown: boolean;
+  availableAuthors: string[];
   unpushedCount: number;
+}
+
+function normalizeIdentity(value: string): string {
+  return value
+    .normalize("NFKC")
+    .toLocaleLowerCase("en-US")
+    .replace(/[^\p{L}\p{N}]+/gu, "");
+}
+
+export function matchesGitAuthor(
+  commit: Pick<Commit, "authorName" | "authorEmail">,
+  author: string,
+): boolean {
+  const target = normalizeIdentity(author);
+  if (!target) return false;
+  const emailLocalPart = commit.authorEmail.split("@")[0] ?? "";
+  return [commit.authorName, commit.authorEmail, emailLocalPart]
+    .map(normalizeIdentity)
+    .includes(target);
+}
+
+export function gitReportTrackingKey(
+  ref: string,
+  author: string,
+): string {
+  return `${ref}::${normalizeIdentity(author)}`;
+}
+
+function parseCommitLog(stdout: string): Commit[] {
+  return stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line): Commit => {
+      const [hash, date, authorName, authorEmail, ...rest] = line.split("\t");
+      return {
+        hash: hash ?? "",
+        date: date ?? "",
+        authorName: authorName ?? "",
+        authorEmail: authorEmail ?? "",
+        subject: rest.join("\t"),
+      };
+    });
 }
 
 async function runGit(cwd: string, args: string[]): Promise<string> {
@@ -45,10 +95,12 @@ function gitFailure(error: unknown, cwd: string): Error {
 }
 
 /**
- * 현재 게임 레포 브랜치의 upstream에 반영된 커밋만 반환한다.
- * Discord 이름이나 로컬 Git author는 수집 기준으로 사용하지 않는다.
+ * 게임 레포의 보고 기준 ref에 반영된 커밋 중 지정한 Git 작성자의 것만 반환한다.
+ * 마지막 보고 HEAD는 ref + 작성자별로 독립 추적한다.
  */
 export async function gitPushedLog(opts: {
+  author: string;
+  ref?: string;
   lastReportedHeads?: Record<string, string>;
   limit?: number;
 }): Promise<PushedCommitLog> {
@@ -62,23 +114,35 @@ export async function gitPushedLog(opts: {
       );
     }
 
-    let upstream: string;
-    try {
-      upstream = await runGit(cwd, [
-        "rev-parse",
-        "--abbrev-ref",
-        "--symbolic-full-name",
-        "@{upstream}",
-      ]);
-    } catch {
-      throw new Error(
-        `현재 브랜치 '${branch}'에 upstream이 없습니다. ` +
-          "`git push -u <remote> <branch>`로 원격 추적 브랜치를 설정한 뒤 다시 시도하세요.",
-      );
+    let upstream = opts.ref?.trim() ?? "";
+    if (upstream) {
+      try {
+        await runGit(cwd, ["rev-parse", "--verify", upstream]);
+      } catch {
+        throw new Error(
+          `Git 보고 기준 ref '${upstream}'를 찾을 수 없습니다. ` +
+            "`git fetch` 후 GIT_REPORT_REF 설정을 확인하세요.",
+        );
+      }
+    } else {
+      try {
+        upstream = await runGit(cwd, [
+          "rev-parse",
+          "--abbrev-ref",
+          "--symbolic-full-name",
+          "@{upstream}",
+        ]);
+      } catch {
+        throw new Error(
+          `현재 브랜치 '${branch}'에 upstream이 없습니다. ` +
+            "`git push -u <remote> <branch>`로 원격 추적 브랜치를 설정한 뒤 다시 시도하세요.",
+        );
+      }
     }
 
     const upstreamHead = await runGit(cwd, ["rev-parse", upstream]);
-    const storedHead = opts.lastReportedHeads?.[upstream] ?? null;
+    const trackingKey = gitReportTrackingKey(upstream, opts.author);
+    const storedHead = opts.lastReportedHeads?.[trackingKey] ?? null;
     let previousReportedHead: string | null = null;
     let revision = upstream;
     let initialSince: string | undefined = "7.days.ago";
@@ -94,44 +158,64 @@ export async function gitPushedLog(opts: {
       }
     }
 
-    const countArgs = ["rev-list", "--count", revision];
-    if (initialSince) countArgs.push(`--since=${initialSince}`);
-    const commitCountRaw = await runGit(cwd, countArgs);
-    const commitCount = Number.parseInt(commitCountRaw, 10);
     const limit = opts.limit ?? 200;
-    if (Number.isFinite(commitCount) && commitCount > limit) {
-      throw new Error(
-        `upstream 신규 커밋이 ${commitCount}건으로 수집 한도(${limit}건)를 초과했습니다. ` +
-          "회의 보고 주기를 줄이거나 수집 한도를 조정하세요.",
-      );
-    }
-
     const logArgs = [
       "log",
       revision,
-      "--pretty=format:%H%x09%cI%x09%s",
+      "--pretty=format:%H%x09%cI%x09%an%x09%ae%x09%s",
     ];
     if (initialSince) logArgs.push(`--since=${initialSince}`);
     const stdout = await runGit(cwd, logArgs);
-    const commits = stdout
+    const allCommits = parseCommitLog(stdout);
+    const commits = allCommits.filter((commit) =>
+      matchesGitAuthor(commit, opts.author),
+    );
+    if (commits.length > limit) {
+      throw new Error(
+        `작성자 '${opts.author}'의 신규 커밋이 ${commits.length}건으로 ` +
+          `수집 한도(${limit}건)를 초과했습니다. 회의 보고 주기를 줄이세요.`,
+      );
+    }
+    const knownAuthorsRaw = await runGit(cwd, [
+      "log",
+      upstream,
+      "--pretty=format:%an%x09%ae",
+    ]);
+    const availableAuthors = [
+      ...new Set(
+        knownAuthorsRaw
+          .split("\n")
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .map((line) => {
+            const [name, email] = line.split("\t");
+            return `${name ?? ""} <${email ?? ""}>`;
+          }),
+      ),
+    ].sort();
+    const authorKnown = knownAuthorsRaw
       .split("\n")
-      .map((l) => l.trim())
+      .map((line) => line.trim())
       .filter(Boolean)
-      .map((line): Commit => {
-        const [hash, date, ...rest] = line.split("\t");
-        return {
-          hash: hash ?? "",
-          date: date ?? "",
-          subject: rest.join("\t"),
-        };
+      .some((line) => {
+        const [authorName, authorEmail] = line.split("\t");
+        return matchesGitAuthor(
+          {
+            authorName: authorName ?? "",
+            authorEmail: authorEmail ?? "",
+          },
+          opts.author,
+        );
       });
 
     const unpushedRaw = await runGit(cwd, [
-      "rev-list",
-      "--count",
+      "log",
       `${upstream}..HEAD`,
+      "--pretty=format:%H%x09%cI%x09%an%x09%ae%x09%s",
     ]);
-    const unpushedCount = Number.parseInt(unpushedRaw, 10);
+    const unpushedCount = parseCommitLog(unpushedRaw).filter((commit) =>
+      matchesGitAuthor(commit, opts.author),
+    ).length;
 
     return {
       commits,
@@ -139,13 +223,19 @@ export async function gitPushedLog(opts: {
       upstream,
       upstreamHead,
       previousReportedHead,
-      unpushedCount: Number.isFinite(unpushedCount) ? unpushedCount : 0,
+      reportAuthor: opts.author,
+      trackingKey,
+      totalCommitCount: allCommits.length,
+      authorKnown,
+      availableAuthors,
+      unpushedCount,
     };
   } catch (e) {
     if (
       e instanceof Error &&
       (e.message.includes("detached HEAD") ||
-        e.message.includes("upstream이 없습니다"))
+        e.message.includes("upstream이 없습니다") ||
+        e.message.includes("Git 보고 기준 ref"))
     ) {
       throw e;
     }

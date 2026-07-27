@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import type { DiscordThread } from "./lib/discord.js";
 import {
+  gitReportTrackingKey,
+  matchesGitAuthor,
+} from "./lib/git.js";
+import {
   currentMeetingDate,
   latestInProgressMeeting,
   meetingSequence,
@@ -83,4 +87,17 @@ assert.equal(
 );
 assert.equal(nextMeetingSequence(threads, "2026-07-27"), 4);
 
-console.log("[smoke] meeting thread selection passed");
+const yoongiCommit = {
+  authorName: "Yoongisang",
+  authorEmail: "sawsd@naver.com",
+};
+assert.equal(matchesGitAuthor(yoongiCommit, "Yoongisang"), true);
+assert.equal(matchesGitAuthor(yoongiCommit, "sawsd@naver.com"), true);
+assert.equal(matchesGitAuthor(yoongiCommit, "sawsd"), true);
+assert.equal(matchesGitAuthor(yoongiCommit, "윤기상"), false);
+assert.notEqual(
+  gitReportTrackingKey("origin/develop", "Yoongisang"),
+  gitReportTrackingKey("origin/develop", "정찬호"),
+);
+
+console.log("[smoke] meeting thread and Git author selection passed");

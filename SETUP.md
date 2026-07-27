@@ -17,6 +17,8 @@
 필요한 값:
 
 - `GAME_PROJECT_PATH`
+- `GIT_REPORT_REF`
+- `GIT_AUTHOR_MAP` 또는 호출 시 `git_author`
 - `DISCORD_BOT_TOKEN`
 - `DISCORD_SCRUM_CHANNEL_ID`
 - Discord 태그명
@@ -76,28 +78,28 @@ npx tsx src/smoke.ts
 
 ## 4. 게임 레포 준비
 
-`prepare_meeting`은 `GAME_PROJECT_PATH`에서 현재 작업 중인 브랜치의 upstream을
-기준으로 커밋을 수집한다.
+`prepare_meeting`은 `GAME_PROJECT_PATH`의 `GIT_REPORT_REF`에서 회의 준비자의
+Git 작성자 커밋만 수집한다. 기본 보고 ref는 `origin/develop`이다.
 
 ```bash
 cd /path/to/GameProject
-git branch --show-current
-git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}'
+git fetch
+git rev-parse origin/develop
 ```
 
-upstream이 없다면 설정한다.
+개인 커밋 확인:
 
 ```bash
-git push -u origin <branch-name>
+git log origin/develop --author="Git author 이름 또는 이메일"
 ```
 
 동작 기준:
 
-- Discord 이름이나 Git author로 필터링하지 않음
-- 이전에 보고한 upstream HEAD 이후의 push된 커밋 수집
-- push되지 않은 로컬 커밋은 제외
-- 최초 실행은 최근 7일의 upstream 커밋 수집
-- 한 번에 신규 커밋이 200건을 넘으면 오류로 중단
+- Discord 보고자를 Git author와 연결해 개인 커밋만 수집
+- 이전에 보고한 HEAD는 보고 ref + 작성자별로 독립 추적
+- 보고 ref에 반영되지 않은 해당 작성자의 로컬 커밋은 제외
+- 최초 실행은 최근 7일의 해당 작성자 커밋 수집
+- 한 번에 해당 작성자의 신규 커밋이 200건을 넘으면 오류로 중단
 
 게임 레포 루트에는 다음 파일이 있어야 한다.
 
@@ -126,7 +128,7 @@ AGENTS.md
 .scrum-state.json
 ```
 
-이 파일은 마지막 보고 upstream HEAD, 현재 회의, 백로그 승인 대기 상태를 저장한다.
+이 파일은 작성자별 마지막 보고 HEAD, 현재 회의, 백로그 승인 대기 상태를 저장한다.
 백로그 미리보기를 만든 환경과 확정 명령을 실행하는 환경이 다르면 승인 상태를 찾지
 못할 수 있다.
 
@@ -150,6 +152,8 @@ cp .env.example .env
 
 ```dotenv
 GAME_PROJECT_PATH=C:\projects\GameProject
+GIT_REPORT_REF=origin/develop
+GIT_AUTHOR_MAP={"Discord닉네임":"GitAuthorName"}
 
 DISCORD_BOT_TOKEN=
 DISCORD_USER_ID=
@@ -160,6 +164,8 @@ DISCORD_TAG_SUMMARY=정리
 ```
 
 - `GAME_PROJECT_PATH`는 각 팀원 PC의 절대 경로다.
+- `GIT_REPORT_REF`는 팀 회의에 반영할 공용 Git ref다.
+- `GIT_AUTHOR_MAP`은 Discord 표시명과 Git author가 다를 때 사용한다. 값은 이름이나 이메일이다.
 - `DISCORD_USER_ID`는 현재 핵심 MCP 로직에서 직접 읽지는 않지만 Channels 연동과
   사용자 식별 설정을 위해 기록한다.
 - 태그명을 변경하지 않았다면 기본값을 그대로 사용한다.
@@ -338,8 +344,9 @@ PM은 별도로 권한 전달을 검증한다.
 ### 회의 준비
 
 1. `prepare_meeting({ user_name })` 호출
+   - 이름이 다르면 `GIT_AUTHOR_MAP`을 설정하거나 `git_author`를 함께 전달
 2. 체크리스트 완료 후보가 있으면 완료 항목 확인
-3. push된 커밋이 있으면 AI가 원문을 검토해 `commit_summary_markdown` 작성
+3. 보고 ref에 반영된 해당 작성자의 커밋을 AI가 검토해 `commit_summary_markdown` 작성
 4. `prepare_meeting` 재호출
 5. 오늘 `[진행]` 회의가 있으면 댓글로 추가
 6. 없으면 `스크럼 회의 YYYY-MM-DD (N차)` 생성
@@ -397,10 +404,21 @@ npx tsx src/smoke.ts
 
 ## 14. 문제 해결
 
-### `현재 브랜치에 upstream이 없습니다`
+### `Git 보고 기준 ref를 찾을 수 없습니다`
 
 ```bash
-git push -u origin <branch-name>
+git fetch
+git rev-parse origin/develop
+```
+
+다른 ref를 사용한다면 `.env`의 `GIT_REPORT_REF`를 변경한다.
+
+### `Git 작성자 매칭 필요`
+
+도구가 반환한 후보에서 올바른 Git author를 확인한 뒤 `.env`에 매핑한다.
+
+```dotenv
+GIT_AUTHOR_MAP={"Discord표시명":"GitAuthorName"}
 ```
 
 ### `오늘 진행 중인 회의 스레드가 없습니다`

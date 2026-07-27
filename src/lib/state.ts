@@ -39,7 +39,7 @@ export interface BacklogProposal {
 export interface PendingBacklogApproval {
   /** Discord 정리 스레드 ID — 봇이 미리보기 메시지를 게시한 스레드. */
   threadId: string;
-  /** 미리보기 메시지 ID — 이 메시지의 ✅ reaction을 검사. */
+  /** 미리보기 메시지 ID — 게시 위치와 승인 대상을 추적한다. */
   messageId: string;
   /** 적용할 proposals 원본. */
   proposals: BacklogProposal[];
@@ -50,7 +50,7 @@ export interface PendingBacklogApproval {
 export interface ScrumState {
   completions: Completion[];
   lastPrepareMeetingAt: string | null;
-  /** upstream별 마지막 Discord 보고 HEAD. 커밋 시각이 아닌 push 반영 범위를 추적한다. */
+  /** 보고 ref + Git 작성자별 마지막 Discord 보고 HEAD. */
   lastReportedUpstreamHeads: Record<string, string>;
   /** 최근 선택된 회의 스레드 ID 캐시. 회의 선택의 기준은 Discord 포럼 조회 결과다. */
   currentMeetingThreadId: string | null;
