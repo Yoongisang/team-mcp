@@ -33,7 +33,7 @@ export interface BacklogProposal {
   startDate?: string;       // YYYY-MM-DD
   dueDate?: string;         // YYYY-MM-DD
   sprintId?: number;
-  comment?: string;         // 회의 출처/맥락 노트
+  comment?: string;         // create의 description 또는 명시적인 comment_only 내용
 }
 
 export interface PendingBacklogApproval {
@@ -50,7 +50,9 @@ export interface PendingBacklogApproval {
 export interface ScrumState {
   completions: Completion[];
   lastPrepareMeetingAt: string | null;
-  /** 진행 중인 포럼 회의 스레드 ID. prepare_meeting이 설정, finish_meeting이 클리어. */
+  /** upstream별 마지막 Discord 보고 HEAD. 커밋 시각이 아닌 push 반영 범위를 추적한다. */
+  lastReportedUpstreamHeads: Record<string, string>;
+  /** 최근 선택된 회의 스레드 ID 캐시. 회의 선택의 기준은 Discord 포럼 조회 결과다. */
   currentMeetingThreadId: string | null;
   /** 직전 회의 스레드 ID. finish_meeting이 클리어 직전 백업 → apply_meeting_to_backlog가 참조. */
   lastFinishedMeetingThreadId: string | null;
@@ -67,6 +69,7 @@ export interface ScrumState {
 const DEFAULT_STATE: ScrumState = {
   completions: [],
   lastPrepareMeetingAt: null,
+  lastReportedUpstreamHeads: {},
   currentMeetingThreadId: null,
   lastFinishedMeetingThreadId: null,
   pendingConfirmations: [],
@@ -85,6 +88,16 @@ export async function loadState(): Promise<ScrumState> {
     return {
       completions: Array.isArray(parsed.completions) ? parsed.completions : [],
       lastPrepareMeetingAt: parsed.lastPrepareMeetingAt ?? null,
+      lastReportedUpstreamHeads:
+        parsed.lastReportedUpstreamHeads &&
+        typeof parsed.lastReportedUpstreamHeads === "object"
+          ? Object.fromEntries(
+              Object.entries(parsed.lastReportedUpstreamHeads).filter(
+                (entry): entry is [string, string] =>
+                  typeof entry[1] === "string",
+              ),
+            )
+          : {},
       currentMeetingThreadId: parsed.currentMeetingThreadId ?? null,
       lastFinishedMeetingThreadId: parsed.lastFinishedMeetingThreadId ?? null,
       pendingConfirmations: Array.isArray(parsed.pendingConfirmations) ? parsed.pendingConfirmations : [],

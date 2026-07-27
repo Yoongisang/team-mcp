@@ -1,9 +1,16 @@
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { config, requireConfig } from "../config.js";
-import { DiscordClient, resolveForumTagIds, type DiscordThread } from "../lib/discord.js";
+import { DiscordClient, resolveForumTagIds } from "../lib/discord.js";
 import { GAME_FILES, gameFileExists, readGameFile, writeGameFile } from "../lib/files.js";
-import { gitLog, gitShowDetails } from "../lib/git.js";
+import { gitPushedLog, gitShowDetails } from "../lib/git.js";
+import {
+  currentMeetingDate,
+  latestInProgressMeeting,
+  meetingSequence,
+  meetingThreadName,
+  nextMeetingSequence,
+} from "../lib/meeting-threads.js";
 import {
   parseChecklist,
   progress,
@@ -17,17 +24,19 @@ export const prepareMeetingTool: Tool = {
   name: "prepare_meeting",
   description:
     "마지막 prepare_meeting 이후의 git 커밋과 체크리스트 진행률을 모아 " +
-    "Discord 포럼 채널에 [진행] 태그로 새 회의 스레드를 생성한다. " +
+    "커밋 검토용 컨텍스트를 먼저 반환하고, 사람이 읽기 좋은 요약을 받은 뒤 " +
+    "오늘 날짜의 가장 최근 [진행] 회의 스레드에 게시한다. 해당 스레드가 없으면 " +
+    "오늘 회차를 계산해 새 회의 스레드를 생성한다. " +
     "커밋과 체크리스트 항목이 부분적으로 일치하면 Discord 포스트 전에 " +
     "사용자에게 확인을 요청한다. confirmed_indexes를 포함해 재호출하면 " +
-    "확인 결과를 체크리스트에 반영하고 Discord에 포스트한다.",
+    "확인 결과를 체크리스트에 반영한다.",
   inputSchema: {
     type: "object",
     properties: {
       user_name: {
         type: "string",
         description:
-          "스크럼 보고자 이름 (git --author 매칭에 사용). " +
+          "Discord에 표시할 스크럼 보고자 이름. 커밋 필터에는 사용하지 않는다. " +
           "Discord 메시지로 트리거된 경우 메시지 작성자의 표시 이름을 그대로 전달.",
       },
       confirmed_indexes: {
@@ -38,6 +47,11 @@ export const prepareMeetingTool: Tool = {
           "없으면 첫 번째 호출로 간주해 부분 매칭 항목이 있을 경우 질문을 반환한다. " +
           "빈 배열([])은 '모두 아님'으로 처리해 Discord 포스트를 진행한다.",
       },
+      commit_summary_markdown: {
+        type: "string",
+        description:
+          "커밋 원문을 검토해 작성한 Discord 게시용 요약. 핵심 변경, 영향 범위, 진행 상태를 사람이 읽기 쉽게 정리한다.",
+      },
     },
     required: ["user_name"],
     additionalProperties: false,
@@ -47,6 +61,7 @@ export const prepareMeetingTool: Tool = {
 const Args = z.object({
   user_name: z.string().min(1),
   confirmed_indexes: z.array(z.number()).optional(),
+  commit_summary_markdown: z.string().min(1).optional(),
 });
 
 // ── 체크리스트 자동완료 ────────────────────────────────────────────────────
@@ -191,8 +206,64 @@ async function autoCompleteFromCommits(
   return { proposals, orphanCommits };
 }
 
+function renderCommitReviewContext(
+  commits: Commit[],
+  userName: string,
+  gitSource: {
+    branch: string;
+    upstream: string;
+    previousReportedHead: string | null;
+    unpushedCount: number;
+  },
+): string {
+  const period = gitSource.previousReportedHead
+    ? `이전 보고 HEAD ${gitSource.previousReportedHead.slice(0, 7)} 이후`
+    : "최초 수집: 최근 7일";
+  const rawCommits = commits
+    .map((commit) => {
+      const lines = [
+        `## ${commit.hash.slice(0, 7)} ${commit.subject}`,
+        `- 작성 시각: ${commit.date}`,
+      ];
+      if (commit.body) lines.push(`- 본문:\n${commit.body}`);
+      if (commit.filesChanged !== undefined) {
+        lines.push(
+          `- 변경량: ${commit.filesChanged} files, +${commit.insertions ?? 0}/-${commit.deletions ?? 0}`,
+        );
+      }
+      if (commit.topFiles?.length) {
+        lines.push(`- 주요 파일: ${commit.topFiles.join(", ")}`);
+      }
+      return lines.join("\n");
+    })
+    .join("\n\n");
+
+  return [
+    "# 스크럼 커밋 요약 작성 컨텍스트",
+    `- 보고자: ${userName}`,
+    `- Git 기준: ${gitSource.branch} → ${gitSource.upstream}에 반영된 커밋`,
+    `- 기간: ${period}`,
+    `- 커밋 수: ${commits.length}`,
+    `- push되지 않아 제외된 로컬 커밋: ${gitSource.unpushedCount}`,
+    "",
+    rawCommits,
+    "",
+    "---",
+    "위 커밋들을 검토해 중복·구현 세부 로그는 합치고, 팀원이 빠르게 이해할 수 있는 Markdown 요약을 작성하세요.",
+    "요약에는 다음 내용을 포함하세요:",
+    "- 핵심 변경 사항",
+    "- 영향받는 기능 또는 시스템",
+    "- 완료된 부분과 아직 확인이 필요한 부분",
+    "- 파일명은 중요한 경우에만 언급",
+    "",
+    "작성한 요약을 `commit_summary_markdown`에 넣어 prepare_meeting을 다시 호출하세요.",
+    "체크리스트 확인 단계를 이미 거쳤다면 `confirmed_indexes: []`도 함께 전달하세요.",
+  ].join("\n");
+}
+
 export async function prepareMeeting(raw: unknown) {
-  const { user_name, confirmed_indexes } = Args.parse(raw);
+  const { user_name, confirmed_indexes, commit_summary_markdown } =
+    Args.parse(raw);
   const token = requireConfig(config.discord.botToken, "DISCORD_BOT_TOKEN");
   const forumId = requireConfig(
     config.discord.scrumChannelId,
@@ -200,10 +271,13 @@ export async function prepareMeeting(raw: unknown) {
   );
 
   const state = await loadState();
-  const since = state.lastPrepareMeetingAt;
 
-  // ── git 커밋 수집 ────────────────────────────────────────────────────
-  const baseCommits = await gitLog({ author: user_name, since, limit: 50 });
+  // ── 게임 레포의 현재 upstream에 push된 커밋 수집 ────────────────────
+  const pushedLog = await gitPushedLog({
+    lastReportedHeads: state.lastReportedUpstreamHeads,
+    limit: 200,
+  });
+  const baseCommits = pushedLog.commits;
   const detailLimit = 10;
   const commits = await Promise.all(
     baseCommits.map(async (c, i) => {
@@ -270,7 +344,22 @@ export async function prepareMeeting(raw: unknown) {
     };
   }
 
-  const orphanSubjects = orphanCommits.map((c) => c.subject);
+  if (commits.length > 0 && !commit_summary_markdown) {
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: renderCommitReviewContext(
+            commits,
+            user_name,
+            pushedLog,
+          ),
+        },
+      ],
+    };
+  }
+
+  const orphanCommitCount = orphanCommits.length;
 
   // ── 진행률 계산 ──────────────────────────────────────────────────────
   let progressLine = "(체크리스트 없음)";
@@ -288,28 +377,12 @@ export async function prepareMeeting(raw: unknown) {
   }
 
   // ── Discord 보고 메시지 빌드 ─────────────────────────────────────────
-  const periodLabel = since
-    ? `${since.slice(0, 19).replace("T", " ")} ~ 지금`
-    : "최근 7일";
+  const periodLabel = pushedLog.previousReportedHead
+    ? `이전 push 보고 ${pushedLog.previousReportedHead.slice(0, 7)} 이후`
+    : "최초 push 수집: 최근 7일";
 
-  const commitsBlock = commits.length === 0
-    ? "(없음)"
-    : commits.map((c) => {
-        const ls: string[] = [`- \`${c.hash.slice(0, 7)}\` ${c.subject}`];
-        if (c.filesChanged !== undefined && c.filesChanged > 0) {
-          ls.push(`  - 변경: ${c.filesChanged} files, +${c.insertions ?? 0}/-${c.deletions ?? 0}`);
-        }
-        if (c.topFiles && c.topFiles.length > 0) {
-          const more = (c.filesChanged ?? 0) > c.topFiles.length
-            ? ` 외 ${(c.filesChanged ?? 0) - c.topFiles.length}개` : "";
-          ls.push(`  - 파일: ${c.topFiles.join(", ")}${more}`);
-        }
-        if (c.body) {
-          const bodyLines = c.body.split("\n").map(s => s.trim()).filter(Boolean).slice(0, 3);
-          for (const bl of bodyLines) ls.push(`  - ${bl.length > 120 ? bl.slice(0, 117) + "..." : bl}`);
-        }
-        return ls.join("\n");
-      }).join("\n");
+  const commitSummaryBlock =
+    commit_summary_markdown?.trim() || "(새 커밋 없음)";
 
   const confirmedBlock = confirmedItems.length > 0
     ? ["", "### ✅ 확인 후 완료 처리", confirmedItems.map(t => `- [x] ${t}`).join("\n")].join("\n")
@@ -319,80 +392,68 @@ export async function prepareMeeting(raw: unknown) {
     ? [
         "",
         "### ⚠️ 완료 후보 (확인 전, 미반영)",
-        newPending.map(p => `- [ ] ${p.itemText} ← ${p.commitSubject}`).join("\n"),
-      ].join("\n")
-    : "";
-
-  const orphanBlock = orphanSubjects.length > 0
-    ? [
-        "",
-        "### ➕ 체크리스트에 없는 커밋 후보 (자동 추가 안 함)",
-        orphanSubjects.map(t => `- ${t}`).join("\n"),
+        newPending.map(p => `- [ ] ${p.itemText}`).join("\n"),
       ].join("\n")
     : "";
 
   const report = [
     `## ${user_name} 스크럼 보고`,
     `_기간: ${periodLabel}_`,
+    `_Git: ${pushedLog.branch} → ${pushedLog.upstream} (push 반영 기준)_`,
     "",
-    "### 최근 커밋",
-    commitsBlock,
+    `### 변경 요약 (${commits.length}커밋)`,
+    commitSummaryBlock,
     confirmedBlock,
     pendingBlock,
-    orphanBlock,
+    orphanCommitCount > 0
+      ? `\n_체크리스트와 직접 연결되지 않은 변경 ${orphanCommitCount}건은 위 요약에 포함됨._`
+      : "",
+    pushedLog.unpushedCount > 0
+      ? `\n_push되지 않은 로컬 커밋 ${pushedLog.unpushedCount}건은 이 보고에서 제외됨._`
+      : "",
     "",
     "### 진행 상황",
     progressLine,
   ].join("\n");
 
-  // ── Discord 포스트 (활성 [진행] 스레드 재사용 or 신규 생성) ───────────
-  //
-  // 우선순위:
-  //   1) Discord 포럼의 활성 [진행] 스레드 자동 탐색 (팀원 누가 만든 것이든)
-  //   2) 검색 실패 시: 로컬 state.currentMeetingThreadId 폴백
-  //   3) 둘 다 없으면: 신규 스레드 생성
-  //
-  // 변경 의도:
-  //   기존엔 state.currentMeetingThreadId만 봐서, 팀원마다 로컬 state가
-  //   분리된 환경에서는 각자 별도 스레드를 생성하는 문제가 있었음.
-  //   Discord 포럼을 source-of-truth로 삼아 같은 [진행] 스레드에 수렴.
+  // Discord 포럼을 source-of-truth로 사용한다.
+  // 오늘 생성된 회의 중 가장 최근 [진행] 스레드에만 이어서 게시한다.
   const client = new DiscordClient(token);
-  const today = new Date().toISOString().slice(0, 10);
+  const today = currentMeetingDate();
   const forum = await client.getChannel(forumId);
   const [inProgressTagId] = resolveForumTagIds(forum, [config.discord.tagInProgress]);
+  const forumThreads = await client.listForumThreads(forumId);
+  let existingThread = latestInProgressMeeting(
+    forumThreads,
+    inProgressTagId!,
+    today,
+  );
 
   let threadId: string;
   let isNewThread: boolean;
+  let meetingNumber: number;
   let followupCount = 0;
 
-  // 1) 포럼에서 활성 [진행] 스레드 탐색 (실패해도 다음 단계로 넘어감)
-  let existingThread: DiscordThread | undefined;
-  try {
-    const activeThreads = await client.listActiveForumThreads(forumId);
-    existingThread = activeThreads
-      .filter((t) => t.applied_tags?.includes(inProgressTagId!))
-      .sort((a, b) => b.id.localeCompare(a.id))[0]; // snowflake 내림차순 = 가장 최근
-  } catch (err) {
-    // 활성 스레드 조회 실패는 치명적 아님 — 폴백 경로로 계속
-    console.error("[prepare_meeting] listActiveForumThreads failed:", err);
-  }
-
   if (existingThread) {
-    // 1) 활성 [진행] 스레드 발견 → 본인 보고를 댓글로 추가
+    meetingNumber = meetingSequence(existingThread.name, today) ?? 1;
+    const normalizedName = meetingThreadName(today, meetingNumber);
+    if (existingThread.name !== normalizedName) {
+      existingThread = await client.setThreadName(existingThread.id, normalizedName);
+    }
+    if (existingThread.thread_metadata?.archived || existingThread.archived) {
+      existingThread = await client.setThreadArchived(existingThread.id, false);
+    }
     threadId = existingThread.id;
     isNewThread = false;
     const msgIds = await client.postChunked(threadId, report);
     followupCount = msgIds.length;
-  } else if (state.currentMeetingThreadId) {
-    // 2) Discord 검색 실패 시 로컬 state 폴백
-    threadId = state.currentMeetingThreadId;
-    isNewThread = false;
-    const msgIds = await client.postChunked(threadId, report);
-    followupCount = msgIds.length;
   } else {
-    // 3) 활성 스레드 없음 → 새로 생성
+    meetingNumber = nextMeetingSequence(forumThreads, today);
     const { thread, followupMessageIds } = await client.createForumThread(
-      forumId, `스크럼 회의 ${today}`, report, [inProgressTagId!],
+      forumId,
+      meetingThreadName(today, meetingNumber),
+      report,
+      [inProgressTagId!],
     );
     threadId = thread.id;
     isNewThread = true;
@@ -400,6 +461,8 @@ export async function prepareMeeting(raw: unknown) {
   }
 
   state.currentMeetingThreadId = threadId;
+  state.lastReportedUpstreamHeads[pushedLog.upstream] =
+    pushedLog.upstreamHead;
   state.pendingConfirmations = [];
   await saveState(state);
 
@@ -409,11 +472,12 @@ export async function prepareMeeting(raw: unknown) {
       text:
         `${isNewThread ? "포럼 회의 스레드 생성 완료" : "기존 회의 스레드에 보고 추가 완료"}\n` +
         `  포럼: ${forumId}\n` +
-        `  스레드: ${threadId}\n` +
+        `  스레드: ${meetingThreadName(today, meetingNumber)} (${threadId})\n` +
         `  ${isNewThread ? `태그: [${config.discord.tagInProgress}]\n  ` : ""}추가 메시지: ${followupCount}건\n` +
         `  확인 후 완료: ${confirmedItems.length > 0 ? confirmedItems.join(", ") : "없음"}\n` +
         `  미반영 완료 후보: ${newPending.length > 0 ? newPending.map(i => i.itemText).join(", ") : "없음"}\n` +
-        `  체크리스트 없는 커밋 후보: ${orphanSubjects.length > 0 ? orphanSubjects.join(", ") : "없음"}\n\n` +
+        `  체크리스트 미연결 변경: ${orphanCommitCount}건\n\n` +
+        `  push되지 않아 제외된 로컬 커밋: ${pushedLog.unpushedCount}건\n\n` +
         `이제 스크럼은 위 스레드의 댓글로 진행하세요. 회의가 끝나면 finish_meeting을 호출하면 됩니다.`,
     }],
   };

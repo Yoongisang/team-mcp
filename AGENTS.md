@@ -56,7 +56,7 @@ MCP 연결 확인 후 기획서와 내 파트가 게임 레포에 없으면 아�
 Channels 플러그인을 통해 Discord 메시지가 컨텍스트로 들어온 경우:
 
 - `prepare_meeting`의 `user_name`: 메시지 작성자의 Discord 표시 이름(또는 username) 그대로 사용.
-  git `--author` 매칭에 쓰이므로 git 커밋 author 이름과 일치하는 게 이상적.
+  Discord 보고자 표시에만 사용하며, 커밋은 `GAME_PROJECT_PATH` 현재 브랜치의 upstream에 push된 내역 전체를 기준으로 수집한다.
 - `finish_meeting`의 `invoker_id`: 메시지 작성자의 Discord **user ID(snowflake, 긴 숫자)** 를 그대로 사용.
   절대 username을 넣지 말 것 (`ALLOWED_USERS`는 ID 기반 검증).
 - 메시지 메타데이터에 ID가 명시적으로 보이지 않으면, 작업을 시도하지 말고 먼저 작성자 ID를 묻는다.
@@ -67,13 +67,20 @@ Channels 플러그인을 통해 Discord 메시지가 컨텍스트로 들어온 �
 
 `DISCORD_SCRUM_CHANNEL_ID`는 **포럼 채널**을 가리킨다. 포럼에 `진행`, `완료`, `정리` 세 태그가 있어야 한다.
 
-1. **prepare_meeting** → 포럼에 `[진행]` 태그 새 스레드 생성 (제목: `스크럼 회의 YYYY-MM-DD`)
-2. 팀원들이 그 스레드의 **댓글**로 스크럼을 진행한다.
-3. **finish_meeting** (인자 없이 1차) → 스레드 댓글 수집 → AI가 요약 분석
-4. **finish_meeting** (summary + action_items로 2차) →
-   - Notion 회의록 페이지 + Jira 이슈 생성 (액션 아이템별 개별 Task)
+1. **prepare_meeting** (1차) → 커밋 상세 컨텍스트 반환 → AI가 사람이 읽기 좋은 변경 요약 작성
+2. **prepare_meeting** (`commit_summary_markdown`으로 재호출) →
+   - 오늘 날짜의 가장 최근 `[진행]` 스레드가 있으면 댓글로 보고 추가
+   - 없으면 그날의 다음 회차로 새 스레드 생성 (제목: `스크럼 회의 YYYY-MM-DD (N차)`)
+3. 팀원들이 그 스레드의 **댓글**로 스크럼을 진행한다.
+4. **finish_meeting** (인자 없이 1차) → 오늘 날짜의 가장 최근 `[진행]` 스레드 댓글 수집 → AI가 요약 분석
+5. **finish_meeting** (summary + action_items로 2차) →
+   - Notion 회의록 페이지 생성
+   - `create_action_issues: true`인 경우에만 Jira 이슈 즉시 생성 (기본은 다음 미리보기·확정 흐름 사용)
    - 원본 스레드 태그 `[진행]` → `[완료]`
-   - 새 `[정리]` 태그 요약 스레드 생성 (Notion·Jira 링크 포함)
+   - 같은 회차가 표시된 새 `[정리]` 태그 요약 스레드 생성 (Notion·Jira 링크 포함)
+6. **apply_meeting_to_backlog** → 새 실행 항목은 기본적으로 새 Jira Task로 제안하고, 미리보기 확인 후 발행
+   - 기존 이슈에는 담당자·일정·스프린트·상태 변경을 명시적으로 결정한 경우에만 직접 반영
+   - 단순 `comment_only`는 사용자가 기존 이슈에 기록만 남기라고 명시한 경우로 제한
 
 ---
 

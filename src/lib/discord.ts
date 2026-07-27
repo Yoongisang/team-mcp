@@ -33,6 +33,11 @@ export interface DiscordThread {
   name: string;
   parent_id: string;
   applied_tags?: string[];
+  archived?: boolean;
+  thread_metadata?: {
+    archived?: boolean;
+    archive_timestamp?: string;
+  };
 }
 
 export class DiscordClient {
@@ -176,7 +181,7 @@ export class DiscordClient {
 
   /**
    * 길드 내 활성 스레드 목록을 조회한 뒤, 지정한 forumId를 parent로 가지는 것만 반환.
-   * `prepare_meeting`에서 팀원 간 활성 [진행] 스레드를 찾기 위해 사용.
+   * `prepare_meeting`과 `finish_meeting`에서 팀원 간 활성 [진행] 스레드를 찾기 위해 사용.
    *
    * Discord API: GET /guilds/{guild.id}/threads/active
    *   응답: { threads: Thread[], members: ThreadMember[] }
@@ -195,6 +200,38 @@ export class DiscordClient {
     );
     const data = (await res.json()) as { threads: DiscordThread[] };
     return (data.threads ?? []).filter((t) => t.parent_id === forumId);
+  }
+
+  async listArchivedForumThreads(forumId: string): Promise<DiscordThread[]> {
+    const res = await this.request(
+      "GET",
+      `/channels/${forumId}/threads/archived/public?limit=100`,
+    );
+    const data = (await res.json()) as { threads?: DiscordThread[] };
+    return (data.threads ?? []).filter((t) => t.parent_id === forumId);
+  }
+
+  async listForumThreads(forumId: string): Promise<DiscordThread[]> {
+    const [active, archived] = await Promise.all([
+      this.listActiveForumThreads(forumId),
+      this.listArchivedForumThreads(forumId),
+    ]);
+    return [...new Map([...active, ...archived].map((t) => [t.id, t])).values()];
+  }
+
+  async setThreadName(threadId: string, name: string): Promise<DiscordThread> {
+    const res = await this.request("PATCH", `/channels/${threadId}`, { name });
+    return (await res.json()) as DiscordThread;
+  }
+
+  async setThreadArchived(
+    threadId: string,
+    archived: boolean,
+  ): Promise<DiscordThread> {
+    const res = await this.request("PATCH", `/channels/${threadId}`, {
+      archived,
+    });
+    return (await res.json()) as DiscordThread;
   }
 
   /**

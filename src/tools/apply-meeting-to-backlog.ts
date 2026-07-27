@@ -47,6 +47,13 @@ const ProposalSchema = z.object({
     }
     return;
   }
+  if (p.action === "comment_only" && !p.comment) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["comment"],
+      message: "comment_only action requires comment",
+    });
+  }
   if (!p.issueKey) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
@@ -66,7 +73,8 @@ const Args = z.object({
 export const applyMeetingToBacklogTool: Tool = {
   name: "apply_meeting_to_backlog",
   description:
-    "PM/팀장 전용. 회의 댓글을 분석해 기존 Jira 백로그/스프린트 작업에 변경사항(담당자·기한·스프린트·코멘트·재오픈)을 적용하고, Jira에 없는 작업은 새 이슈로 생성. " +
+    "PM/팀장 전용. 회의 댓글을 분석해 새로 결정된 실행 항목은 기본적으로 새 Jira 이슈로 생성하고, " +
+    "기존 이슈의 담당자·기한·스프린트·상태를 명시적으로 바꾸기로 한 경우에만 기존 이슈를 수정한다. " +
     "3단계 호출:\n" +
     "  [Phase 1] 인자 없이(invoker_id만) 호출 → 백로그 전체 + 회의 댓글 컨텍스트 반환. LLM은 이를 분석해 proposals 작성.\n" +
     "  [Phase 2] proposals 인자 전달 → Discord 정리 스레드에 미리보기 게시. state에 승인 대기 저장.\n" +
@@ -87,9 +95,10 @@ export const applyMeetingToBacklogTool: Tool = {
         description:
           "[Phase 2 전용] LLM이 회의 분석 후 작성한 변경 제안 목록. " +
           "각 항목은 action(create/assign/schedule/move_to_sprint/comment_only/reopen)을 가진다. " +
-          "기존 이슈 변경은 issueKey가 필요하고, Jira에 없는 새 작업은 create + summary가 필요하다. " +
+          "새 실행 작업은 기존 이슈와 관련이 있어도 create + summary가 기본이다. " +
+          "기존 이슈 변경은 회의에서 해당 이슈의 속성 변경을 명시한 경우에만 issueKey를 사용한다. " +
           "필요 필드는 action별로 다름: create→summary/dueDate/startDate, assign→assigneeName, schedule→dueDate/startDate, " +
-          "move_to_sprint→sprintId, comment_only/reopen→comment.",
+          "move_to_sprint→sprintId, comment_only→comment.",
         items: {
           type: "object",
           properties: {
@@ -127,7 +136,9 @@ export const applyMeetingToBacklogTool: Tool = {
             sprintId: { type: "number" },
             comment: {
               type: "string",
-              description: "회의 출처/맥락. 모든 액션에 코멘트 부착 권장.",
+              description:
+                "회의 출처/맥락. create에서는 새 이슈 description으로 사용한다. " +
+                "comment_only는 사용자가 기존 이슈에 기록만 남기라고 명시한 경우에만 사용한다.",
             },
           },
           required: ["action"],
@@ -280,7 +291,6 @@ export async function applyMeetingToBacklog(raw: unknown) {
     };
 
     for (const p of pending.proposals) {
-      let commentTargetKey: string | undefined;
       try {
         switch (p.action) {
           case "create": {
@@ -294,8 +304,6 @@ export async function applyMeetingToBacklog(raw: unknown) {
               startDate: p.startDate,
               dueDate: p.dueDate,
             });
-            commentTargetKey = issue.key;
-
             const parts: string[] = [`생성 ${issue.url}`];
             if (p.startDate) parts.push(`시작 ${p.startDate}`);
             if (p.dueDate) parts.push(`기한 ${p.dueDate}`);
@@ -344,7 +352,6 @@ export async function applyMeetingToBacklog(raw: unknown) {
             await jira.updateIssue(issueKey, {
               assigneeAccountId: user.accountId,
             });
-            commentTargetKey = issueKey;
             results.push(`${issueKey} → 담당자 ${user.displayName}`);
             break;
           }
@@ -365,7 +372,6 @@ export async function applyMeetingToBacklog(raw: unknown) {
               await moveToSprintForDueDate(issueKey, p.dueDate, parts);
             }
 
-            commentTargetKey = issueKey;
             results.push(`${issueKey} → ${parts.join(", ") || "(변경 없음)"}`);
             break;
           }
@@ -373,7 +379,6 @@ export async function applyMeetingToBacklog(raw: unknown) {
             const issueKey = requireIssueKey(p);
             if (!p.sprintId) throw new Error("sprintId 누락");
             await jira.moveIssuesToSprint(p.sprintId, [issueKey]);
-            commentTargetKey = issueKey;
             results.push(`${issueKey} → 스프린트 ${p.sprintId}`);
             break;
           }
@@ -382,22 +387,16 @@ export async function applyMeetingToBacklog(raw: unknown) {
             const transitioned = await jira.transitionIssueToInProgress(
               issueKey,
             );
-            commentTargetKey = issueKey;
             results.push(`${issueKey} → ${transitioned} 재오픈`);
             break;
           }
           case "comment_only": {
             const issueKey = requireIssueKey(p);
-            // 코멘트만 부착 (아래 공통 처리)
-            commentTargetKey = issueKey;
+            if (!p.comment) throw new Error("comment 누락");
+            await jira.addComment(issueKey, `[회의] ${p.comment}`);
             results.push(`${issueKey} → 코멘트만`);
             break;
           }
-        }
-
-        // 모든 액션에 코멘트 부착 (있을 때)
-        if (p.comment && commentTargetKey) {
-          await jira.addComment(commentTargetKey, `[회의] ${p.comment}`);
         }
       } catch (e) {
         const label = p.issueKey ?? p.summary ?? "새 이슈";
@@ -646,13 +645,10 @@ export async function applyMeetingToBacklog(raw: unknown) {
     "{",
     '  "invoker_id": "...",',
     '  "proposals": [',
-    '    { "issueKey": "LIU-9", "action": "assign", "assigneeName": "김민수",',
-    '      "comment": "회의 발화 출처/맥락" },',
-    '    { "issueKey": "LIU-15", "action": "schedule", "dueDate": "2026-05-20",',
-    '      "comment": "..." },',
-    '    { "issueKey": "LIU-22", "action": "move_to_sprint", "sprintId": 1, "comment": "..." },',
-    '    { "issueKey": "LIU-30", "action": "reopen", "comment": "회의에서 추가 작업 필요로 다시 시작" },',
-    '    { "issueKey": "LIU-42", "action": "comment_only", "comment": "진행 노트" },',
+    '    { "issueKey": "LIU-9", "action": "assign", "assigneeName": "김민수" },',
+    '    { "issueKey": "LIU-15", "action": "schedule", "dueDate": "2026-05-20" },',
+    '    { "issueKey": "LIU-22", "action": "move_to_sprint", "sprintId": 1 },',
+    '    { "issueKey": "LIU-30", "action": "reopen" },',
     '    { "action": "create", "summary": "신규 락온 UI 피드백 반영",',
     '      "dueDate": "2026-05-20", "assigneeName": "김민수",',
     '      "comment": "회의에서 새 작업으로 확인됨" }',
@@ -661,19 +657,20 @@ export async function applyMeetingToBacklog(raw: unknown) {
     "```",
     "",
     "분석 가이드:",
-    "  - **매칭 기준은 작업 내용(summary)뿐.** 누가 현재 그 이슈 담당이든, 누가 회의에서 발화했든 매칭 신호로 쓰지 말 것.",
-    "    예) 회의에서 '락온 컴포넌트 끝났음'이라고 했으면 → summary에 '락온/LockOn' 키워드 있는 이슈를 매칭. 발화자 ≠ 담당자여도 매칭 성립.",
-    "  - 회의에서 명확히 언급된 작업만 매칭하라. 모호하면 제외.",
+    "  - **새로 수행해야 하는 작업·후속 조치·피드백 반영·추가 수정은 기본적으로 `create`.** 관련된 기존 이슈가 있어도 댓글로 대체하지 말고 독립된 새 액션 이슈를 발행하라.",
+    "  - `assign`, `schedule`, `move_to_sprint`, `reopen`은 회의에서 기존 이슈 자체의 담당자·일정·스프린트·상태를 바꾸기로 명확히 결정한 경우에만 사용하라.",
+    "  - `comment_only`는 사용자가 '기존 이슈에 기록만 남겨라'라고 명시한 경우에만 사용한다. 실행할 일이 포함된 발화에는 사용하지 말 것.",
+    "  - 기존 이슈를 수정할 때의 매칭 기준은 작업 내용(summary)뿐이다. 현재 담당자나 발화자는 매칭 신호로 사용하지 말 것.",
+    "  - 회의에서 명확히 결정된 작업만 proposal로 만들고, 모호하면 제외.",
     "  - 동일 이슈에 여러 변경이 있으면 여러 proposal로 분할 (예: 담당자+기한 = assign + schedule 2건).",
     "  - `assign` 액션의 assigneeName은 회의에서 **명시적으로 누가 맡기로 했는지** 발화된 경우에만 채울 것.",
     "    누가 맡았는지 회의에 언급이 없으면 assign 액션 자체를 만들지 말 것 (현재 담당자 추정 금지).",
     "  - **`create` 또는 `schedule` 액션에 dueDate를 넣으면 서버가 자동으로 그 마감일에 맞는 스프린트로 이동시킴.**",
     "    별도로 `move_to_sprint` proposal을 만들 필요 없음. dueDate만 정확히 추출하면 됨.",
-    "    회의에서 마감일이 언급된 작업은 거의 모두 `schedule` 액션으로 만들어 백로그에서 스프린트로 자동 승격되게 하라.",
+    "    새 작업에 마감일이 있으면 `create`에 dueDate를 넣고, 기존 이슈의 마감일 변경일 때만 `schedule`을 사용하라.",
     "  - `move_to_sprint`는 마감일 변경 없이 다른 스프린트로 이동시킬 때만 사용 (드문 케이스).",
-    "  - 모든 proposal에 가능한 한 `comment`를 포함해 회의 출처를 남겨라 (예: '회의 2026-05-13에서 김XX가 맡기로 함').",
-    "  - 완료 상태(Done/완료) 이슈가 회의에서 '다시', '추가', '재작업' 등으로 언급되면 `reopen`.",
-    "  - 백로그에 없는 신규 작업 요청은 `create` proposal로 넣어라. `summary`는 Jira 이슈 제목, `dueDate`가 있으면 일정 적용 + 스프린트 자동 배정까지 수행된다.",
+    "  - `create` proposal의 `comment`에는 회의 출처를 넣어 새 이슈 description으로 남겨라.",
+    "  - 완료 이슈의 상태 자체를 다시 진행으로 돌리기로 했으면 `reopen`. 별도 추가 작업이나 재작업이면 새 `create` 이슈를 발행하라.",
     "",
     "재호출 시 Phase 2가 실행되어 Discord 정리 스레드에 미리보기를 게시하고 PM/팀장의 텍스트 확정을 대기한다.",
   ].join("\n");

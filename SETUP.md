@@ -9,6 +9,8 @@
 3. `.env.example`을 `.env`로 복사
 4. 사용자에게 다음 값 입력 받기:
    - `GAME_PROJECT_PATH` — 게임 레포 절대 경로 (예: `C:\Users\me\projects\EternalDreams`)
+     - 현재 작업 브랜치에 upstream이 설정돼 있어야 함 (`git push -u <remote> <branch>`)
+     - `prepare_meeting`은 upstream에 반영된 커밋만 수집하고 미푸시 로컬 커밋은 제외함
    - `DISCORD_BOT_TOKEN` (PM이 공유)
    - `DISCORD_USER_ID` (본인)
    - `DISCORD_SCRUM_CHANNEL_ID` (**포럼 채널** ID — 텍스트 채널 아님)

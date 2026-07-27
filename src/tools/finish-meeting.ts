@@ -9,6 +9,11 @@ import {
 import { JiraClient, type CreatedIssue } from "../lib/jira.js";
 import { NotionLock } from "../lib/lock.js";
 import { NotionClient } from "../lib/notion.js";
+import {
+  currentMeetingDate,
+  latestInProgressMeeting,
+  meetingSequence,
+} from "../lib/meeting-threads.js";
 import { checkPermission } from "../lib/safety.js";
 import { loadState, saveState } from "../lib/state.js";
 import {
@@ -22,7 +27,7 @@ import { parseChecklist, setItemDone, joinLines } from "../lib/markdown.js";
 export const finishMeetingTool: Tool = {
   name: "finish_meeting",
   description:
-    "PM/팀장 전용. 진행 중인 회의 포럼 스레드의 댓글을 모두 수집해 " +
+    "PM/팀장 전용. 오늘 날짜의 가장 최근 [진행] 회의 포럼 스레드 댓글을 모두 수집해 " +
     "Notion 회의록 + Jira 이슈 생성, 원본 스레드 태그를 [진행]→[완료]로 교체, " +
     "같은 포럼에 [정리] 태그로 새 요약 스레드 생성. " +
     "인자 없이 호출하면 메시지 컨텍스트만 반환하며, summary와 action_items를 " +
@@ -48,7 +53,7 @@ export const finishMeetingTool: Tool = {
       },
       title: {
         type: "string",
-        description: "회의록 제목 (기본: '스크럼 회의록 YYYY-MM-DD')",
+        description: "회의록 제목 (기본: '스크럼 회의록 YYYY-MM-DD (N차)')",
       },
       sprint_end_date: {
         type: "string",
@@ -66,10 +71,9 @@ export const finishMeetingTool: Tool = {
       create_action_issues: {
         type: "boolean",
         description:
-          "true이면 액션 아이템마다 새 Jira Task를 생성한다(레거시 동작). " +
-          "기본 false — 기존 백로그가 import된 환경에서는 apply_meeting_to_backlog로 " +
-          "기존 이슈를 업데이트하는 것을 권장하므로 중복 생성을 피한다. " +
-          "정말 신규 액션 아이템뿐이라 백로그 매칭이 불필요할 때만 true.",
+          "true이면 승인 미리보기 없이 액션 아이템마다 새 Jira Task를 즉시 생성한다. " +
+          "기본 false — apply_meeting_to_backlog의 미리보기·확인 절차를 거친 뒤 " +
+          "새 실행 항목을 Jira 이슈로 발행하는 흐름을 권장한다.",
       },
     },
     required: ["invoker_id"],
@@ -105,14 +109,34 @@ export async function finishMeeting(raw: unknown) {
 
   const discord = new DiscordClient(token);
   const state = await loadState();
+  const today = currentMeetingDate();
+  const forum = await discord.getChannel(forumId);
+  const [inProgressTagId, completedTagId, summaryTagId] = resolveForumTagIds(
+    forum,
+    [
+      config.discord.tagInProgress,
+      config.discord.tagCompleted,
+      config.discord.tagSummary,
+    ],
+  );
+  const forumThreads = await discord.listForumThreads(forumId);
+  let meetingThread = latestInProgressMeeting(
+    forumThreads,
+    inProgressTagId!,
+    today,
+  );
 
-  if (!state.currentMeetingThreadId) {
+  if (!meetingThread) {
     throw new Error(
-      "진행 중인 회의 스레드가 없습니다. 먼저 prepare_meeting을 호출해 " +
-        "포럼에 [진행] 태그 스레드를 생성하세요.",
+      `오늘(${today}) 진행 중인 회의 스레드가 없습니다. ` +
+        "먼저 prepare_meeting을 호출해 포럼에 [진행] 태그 스레드를 생성하세요.",
     );
   }
-  const threadId = state.currentMeetingThreadId;
+  const meetingNumber = meetingSequence(meetingThread.name, today) ?? 1;
+  if (meetingThread.thread_metadata?.archived || meetingThread.archived) {
+    meetingThread = await discord.setThreadArchived(meetingThread.id, false);
+  }
+  const threadId = meetingThread.id;
 
   // 스레드의 모든 댓글 수집 (스레드 자체도 채널이라 listMessages 사용 가능)
   const raw_messages = await discord.listAllMessages(threadId, 1000);
@@ -169,7 +193,7 @@ export async function finishMeeting(raw: unknown) {
       : "";
     const text = [
       "# 회의록 작성 컨텍스트",
-      `_스레드: ${threadId}, 댓글 ${messages.length}건._${confirmedNote}`,
+      `_스레드: ${meetingThread.name} (${threadId}), 댓글 ${messages.length}건._${confirmedNote}`,
       "",
       "## 스레드 댓글",
       ctx,
@@ -207,17 +231,9 @@ export async function finishMeeting(raw: unknown) {
   const lock = new NotionLock(notion, notionLockDb);
   const jira = new JiraClient(jiraHost, jiraEmail, jiraToken);
 
-  // 포럼 태그 ID 미리 해석 (실패 시 락 잡기 전에 빠르게 fail)
-  const forum = await discord.getChannel(forumId);
-  const [completedTagId, summaryTagId] = resolveForumTagIds(forum, [
-    config.discord.tagCompleted,
-    config.discord.tagSummary,
-  ]);
-
   const acquired = await lock.acquire();
   try {
-    const today = new Date().toISOString().slice(0, 10);
-    const title = args.title ?? `스크럼 회의록 ${today}`;
+    const title = args.title ?? `스크럼 회의록 ${today} (${meetingNumber}차)`;
 
     const itemsBlock = args.action_items
       .map((it, i) => `${i + 1}. ${it}`)
@@ -260,8 +276,8 @@ export async function finishMeeting(raw: unknown) {
     }
 
     // ── 액션 아이템별 Jira Task 생성 (옵트인) ─────────────────────────
-    // 기본 false: 기존 백로그가 있는 환경에서 중복 생성을 피하기 위함.
-    // 백로그 매칭/업데이트는 apply_meeting_to_backlog 도구를 별도로 호출.
+    // 기본 false: 승인 미리보기 없이 Jira 이슈를 바로 생성하지 않기 위함.
+    // 새 액션 발행과 명시적인 기존 이슈 변경은 apply_meeting_to_backlog에서 처리.
     const actionIssues: CreatedIssue[] = [];
     if (args.create_action_issues === true) {
       for (const item of args.action_items) {
@@ -332,7 +348,7 @@ export async function finishMeeting(raw: unknown) {
     await discord.setThreadTags(threadId, [completedTagId!]);
 
     // [정리] 태그 새 스레드 생성
-    const summaryThreadName = `스크럼 회의 정리 ${today}`;
+    const summaryThreadName = `스크럼 회의 정리 ${today} (${meetingNumber}차)`;
     const jiraActionLinks = actionIssues
       .map((iss, i) => `- [${iss.key}] ${args.action_items![i]}: ${iss.url}`)
       .join("\n");
@@ -378,14 +394,14 @@ export async function finishMeeting(raw: unknown) {
         ? `  Jira 액션 아이템: ${actionIssues.length}개 (${actionIssues
             .map((i) => i.key)
             .join(", ")})\n`
-        : `  Jira 액션 아이템: (생략 — apply_meeting_to_backlog로 기존 백로그 업데이트 권장)\n`;
+        : `  Jira 액션 아이템: (생략 — apply_meeting_to_backlog 미리보기·확정 후 신규 발행 권장)\n`;
 
     const nextStepHint =
       args.create_action_issues === true
         ? ""
         : "\n다음 단계:\n" +
           "  apply_meeting_to_backlog 도구를 인자 없이(invoker_id만) 호출하면\n" +
-          "  방금 수집한 회의 댓글과 백로그 전체를 분석해 기존 이슈에 변경사항을 적용할 수 있다.\n";
+          "  방금 수집한 회의 댓글을 분석해 새 액션 발행과 명시적인 기존 이슈 변경을 제안할 수 있다.\n";
 
     return {
       content: [
