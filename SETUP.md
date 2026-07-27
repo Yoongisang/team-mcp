@@ -1,182 +1,430 @@
-# Auto Setup Guide for AI Tools
+# Team MCP Setup Guide
 
-이 파일은 AI 도구(Claude Code · Codex · Cursor)가 읽고 자동 세팅하기 위한 지시서.
+이 문서는 신규 팀원 PC에 `team-mcp`를 설치하고 Claude Code, Codex, Cursor에
+연결하는 절차다.
 
-## 세팅 절차
+## 1. 역할 확인
 
-1. `npm install` 실행
-2. `npm run build` 실행 (TypeScript 컴파일 → `dist/`)
-3. `.env.example`을 `.env`로 복사
-4. 사용자에게 다음 값 입력 받기:
-   - `GAME_PROJECT_PATH` — 게임 레포 절대 경로 (예: `C:\Users\me\projects\EternalDreams`)
-     - 현재 작업 브랜치에 upstream이 설정돼 있어야 함 (`git push -u <remote> <branch>`)
-     - `prepare_meeting`은 upstream에 반영된 커밋만 수집하고 미푸시 로컬 커밋은 제외함
-   - `DISCORD_BOT_TOKEN` (PM이 공유)
-   - `DISCORD_USER_ID` (본인)
-   - `DISCORD_SCRUM_CHANNEL_ID` (**포럼 채널** ID — 텍스트 채널 아님)
-   - `DISCORD_TAG_IN_PROGRESS` / `DISCORD_TAG_COMPLETED` / `DISCORD_TAG_SUMMARY` (선택, 기본값 `진행`/`완료`/`정리`)
-   - `NOTION_API_KEY`, `NOTION_PARENT_PAGE_ID`, `NOTION_LOCK_DB_ID` (PM/팀장만)
-   - `JIRA_API_TOKEN`, `JIRA_EMAIL`, `JIRA_HOST`, `JIRA_PROJECT_KEY` (PM/팀장만)
-   - `ALLOWED_USERS` (PM/팀장 Discord ID 목록, 콤마 구분)
-5. MCP 서버 등록:
+### 일반 팀원
 
-### Claude Code (v2.1+) — `claude mcp add` 명령 사용
+사용 가능:
 
-> ⚠️ Claude Code v2.1+에서는 `settings.json`의 `mcpServers` 필드가 인식되지 않음.
-> 반드시 아래 CLI 명령으로 등록해야 `~/.claude.json`에 올바르게 저장됨.
+- 플랜과 체크리스트 조회·수정
+- 작업 완료 처리
+- 회의 준비
+- Discord 회의 참여
 
-**Windows:**
+필요한 값:
+
+- `GAME_PROJECT_PATH`
+- `DISCORD_BOT_TOKEN`
+- `DISCORD_SCRUM_CHANNEL_ID`
+- Discord 태그명
+
+### PM/팀장
+
+추가 사용 가능:
+
+- 회의 완료
+- Notion 회의록 생성
+- Jira 백로그 미리보기와 확정
+- Jira 이슈 생성·수정·스프린트 배정
+
+추가로 필요한 값:
+
+- `NOTION_*`
+- `JIRA_*`
+- `ALLOWED_USERS`
+
+일반 팀원 PC에서는 PM 전용 값을 비워둔다.
+
+## 2. 사전 요구 사항
+
+- Node.js 20 이상
+- Git
+- Claude Code, Codex, Cursor 중 사용할 AI 도구
+- 로컬에 clone된 게임 레포
+- 게임 레포를 읽고 쓸 수 있는 권한
+
+버전 확인:
+
 ```bash
-claude mcp add team-mcp "C:/Program Files/nodejs/node.exe" "C:/절대경로/team-mcp/dist/server.js" --scope user
+node --version
+git --version
 ```
 
-**macOS/Linux:**
+## 3. team-mcp 설치
+
 ```bash
-claude mcp add team-mcp node /절대경로/team-mcp/dist/server.js --scope user
+git clone https://github.com/Yoongisang/team-mcp.git
+cd team-mcp
+npm install
+npm run build
 ```
 
-등록 확인:
+설치 검증:
+
+```bash
+npx tsx src/smoke.ts
+```
+
+정상 출력:
+
+```text
+[smoke] meeting thread selection passed
+```
+
+## 4. 게임 레포 준비
+
+`prepare_meeting`은 `GAME_PROJECT_PATH`에서 현재 작업 중인 브랜치의 upstream을
+기준으로 커밋을 수집한다.
+
+```bash
+cd /path/to/GameProject
+git branch --show-current
+git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}'
+```
+
+upstream이 없다면 설정한다.
+
+```bash
+git push -u origin <branch-name>
+```
+
+동작 기준:
+
+- Discord 이름이나 Git author로 필터링하지 않음
+- 이전에 보고한 upstream HEAD 이후의 push된 커밋 수집
+- push되지 않은 로컬 커밋은 제외
+- 최초 실행은 최근 7일의 upstream 커밋 수집
+- 한 번에 신규 커밋이 200건을 넘으면 오류로 중단
+
+게임 레포 루트에는 다음 파일이 있어야 한다.
+
+```text
+AGENTS.md
+기획서.md
+내파트.md
+플랜.md
+체크리스트.md
+```
+
+기존 팀 프로젝트라면 게임 레포에 들어 있는 최신 `AGENTS.md`와 기획 파일을 그대로
+사용한다. 파일이 없을 때만 `team-mcp/AGENTS.md`의 자연어 매핑 규칙을 게임 레포의
+규칙과 병합한다. 기존 게임 규칙을 덮어쓰지 않는다.
+
+완전 신규 프로젝트라서 `기획서.md`, `내파트.md`, `플랜.md`, `체크리스트.md`가
+없다면 다음 순서로 최초 1회 생성한다.
+
+1. `create_plan({ spec_content, my_part_content })`로 기획서와 담당 파트를 저장한다.
+2. 반환된 컨텍스트를 AI가 분석한다.
+3. `create_plan({ plan_markdown, checklist_markdown })`으로 플랜과 체크리스트를 저장한다.
+
+게임 레포 `.gitignore`에는 다음을 추가한다.
+
+```gitignore
+.scrum-state.json
+```
+
+이 파일은 마지막 보고 upstream HEAD, 현재 회의, 백로그 승인 대기 상태를 저장한다.
+백로그 미리보기를 만든 환경과 확정 명령을 실행하는 환경이 다르면 승인 상태를 찾지
+못할 수 있다.
+
+## 5. 환경변수 설정
+
+`team-mcp` 디렉토리에서 `.env`를 만든다.
+
+Windows PowerShell:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+macOS/Linux:
+
+```bash
+cp .env.example .env
+```
+
+### 일반 팀원
+
+```dotenv
+GAME_PROJECT_PATH=C:\projects\GameProject
+
+DISCORD_BOT_TOKEN=
+DISCORD_USER_ID=
+DISCORD_SCRUM_CHANNEL_ID=
+DISCORD_TAG_IN_PROGRESS=진행
+DISCORD_TAG_COMPLETED=완료
+DISCORD_TAG_SUMMARY=정리
+```
+
+- `GAME_PROJECT_PATH`는 각 팀원 PC의 절대 경로다.
+- `DISCORD_USER_ID`는 현재 핵심 MCP 로직에서 직접 읽지는 않지만 Channels 연동과
+  사용자 식별 설정을 위해 기록한다.
+- 태그명을 변경하지 않았다면 기본값을 그대로 사용한다.
+
+### PM/팀장 추가 설정
+
+```dotenv
+NOTION_API_KEY=
+NOTION_PARENT_PAGE_ID=
+NOTION_LOCK_DB_ID=
+
+JIRA_API_TOKEN=
+JIRA_EMAIL=
+JIRA_HOST=your-domain.atlassian.net
+JIRA_PROJECT_KEY=
+JIRA_TASK_TYPE=Task
+
+ALLOWED_USERS=123456789012345678,987654321098765432
+```
+
+- `ALLOWED_USERS`에는 username이 아니라 Discord snowflake ID를 넣는다.
+- `finish_meeting`과 `apply_meeting_to_backlog`는 이 목록으로 권한을 검사한다.
+- `.env`는 절대 Git에 커밋하지 않는다.
+- Bot/Jira/Notion 토큰은 비밀 관리 수단으로 전달한다.
+
+현재 구조는 각 PC에서 로컬 MCP 서버가 Discord API를 직접 호출하므로
+`prepare_meeting`을 실행하는 팀원 PC에도 Discord Bot 토큰이 필요하다. 팀원에게
+Bot 토큰을 배포하지 않으려면 MCP를 중앙 실행 환경으로 운영해야 한다.
+
+## 6. Discord 사전 준비
+
+PM이 최초 1회 설정한다.
+
+1. 회의용 Discord 포럼 채널을 만든다.
+2. 포럼에 정확히 다음 태그를 만든다.
+
+```text
+진행
+완료
+정리
+```
+
+3. 포럼 채널 ID를 `DISCORD_SCRUM_CHANNEL_ID`에 설정한다.
+4. Bot에 다음 권한을 부여한다.
+
+- View Channel
+- Send Messages
+- Create Public Threads
+- Send Messages in Threads
+- Read Message History
+- Manage Threads
+
+`Manage Threads`는 스레드 이름, 보관 상태, 태그를 변경할 때 필요하다.
+
+## 7. Notion 사전 준비
+
+PM/팀장만 설정한다.
+
+1. 회의록 부모 페이지를 만들고 ID를 `NOTION_PARENT_PAGE_ID`에 설정한다.
+2. 락 데이터베이스를 만들고 다음 속성을 둔다.
+
+| 속성 | 타입 |
+|---|---|
+| `Name` | Title |
+| `expires_at` | Date |
+
+3. DB ID를 `NOTION_LOCK_DB_ID`에 설정한다.
+4. Notion Integration에 회의록 부모 페이지와 락 DB 접근 권한을 부여한다.
+5. Integration 토큰을 `NOTION_API_KEY`에 설정한다.
+
+## 8. Jira 사전 준비
+
+PM/팀장만 설정한다.
+
+1. Jira API 토큰과 이메일을 `JIRA_API_TOKEN`, `JIRA_EMAIL`에 설정한다.
+2. `JIRA_HOST`에는 `https://` 없이 호스트만 입력한다.
+3. 프로젝트 키를 `JIRA_PROJECT_KEY`에 설정한다.
+4. 기본 이슈 타입을 `JIRA_TASK_TYPE`에 설정한다. 기본값은 `Task`다.
+5. 자동 스프린트 배정을 사용하려면 Jira Software 스크럼 보드가 있어야 한다.
+6. API 계정에 이슈 생성·수정·전환과 스프린트 이슈 추가 권한을 부여한다.
+
+Jira 적용 정책:
+
+- 새 작업, 후속 조치, 피드백 반영, 추가 수정은 기본적으로 새 이슈 생성
+- 기존 이슈의 담당자·일정·스프린트·상태 변경은 회의에서 명시한 경우만 적용
+- 기존 이슈 댓글은 명시적인 `comment_only` 요청에서만 작성
+- `dueDate`가 있는 `create` 또는 `schedule`은 날짜에 맞는 스프린트로 자동 배정
+
+## 9. MCP 등록
+
+`dist/server.js`의 절대 경로를 사용한다.
+등록 형식 참고: [Claude Code MCP](https://docs.anthropic.com/en/docs/claude-code/mcp),
+[Cursor MCP](https://docs.cursor.com/context/model-context-protocol).
+
+### Claude Code
+
+Windows:
+
+```powershell
+claude mcp add team-mcp --scope user -- `
+  "C:/Program Files/nodejs/node.exe" `
+  "C:/absolute/path/team-mcp/dist/server.js"
+```
+
+macOS/Linux:
+
+```bash
+claude mcp add team-mcp --scope user -- node /absolute/path/team-mcp/dist/server.js
+```
+
+확인:
+
 ```bash
 claude mcp list
-# 출력 예시: team-mcp: node /path/to/team-mcp/dist/server.js - ✓ Connected
 ```
 
-> `.env` 파일이 team-mcp 디렉토리에 있으면 서버 시작 시 자동으로 로드됨.
-> `--env KEY=VALUE` 플래그로 직접 넘길 수도 있지만, `.env` 방식을 권장.
+### Codex
 
-### Codex — `~/.codex/config.toml`
+CLI 등록:
+
+Windows:
+
+```powershell
+codex.cmd mcp add team-mcp -- node C:/absolute/path/team-mcp/dist/server.js
+codex.cmd mcp list
+```
+
+macOS/Linux:
+
+```bash
+codex mcp add team-mcp -- node /absolute/path/team-mcp/dist/server.js
+codex mcp list
+```
+
+수동 등록이 필요하면 `~/.codex/config.toml`에 다음을 추가한다.
 
 ```toml
 [mcp_servers.team-mcp]
 command = "node"
-args = ["<absolute-path-to>/team-mcp/dist/server.js"]
+args = ["C:/absolute/path/team-mcp/dist/server.js"]
 ```
 
-### Cursor — `.cursor/mcp.json`
+### Cursor
+
+게임 레포의 `.cursor/mcp.json`은 프로젝트 설정이고, 사용자 홈의
+`~/.cursor/mcp.json`은 전역 설정이다. 둘 중 하나에 다음을 추가한다.
 
 ```json
 {
   "mcpServers": {
     "team-mcp": {
       "command": "node",
-      "args": ["<absolute-path-to>/team-mcp/dist/server.js"]
+      "args": ["C:/absolute/path/team-mcp/dist/server.js"]
     }
   }
 }
 ```
 
-6. 테스트:
-   - Claude Code 완전히 종료 후 재시작
-   - `/mcp` 명령으로 `team-mcp ✓ connected` 확인
-   - `"진행 상황 보여줘"` 또는 `show_progress` 직접 호출 → 정상 응답이면 OK
+등록 또는 빌드 후 AI 도구를 완전히 재시작한다.
 
-7. **초기 프로젝트 세팅 (최초 1회)** — MCP 연결 확인 후 바로 진행:
+## 10. 연결 확인
 
-   사용자에게 아래 두 가지를 순서대로 물어보고, 답변을 받은 뒤 `create_plan`을 호출해 플랜과 체크리스트를 생성한다.
+1. AI 도구에서 MCP 서버가 연결됐는지 확인한다.
+2. `"팀 규칙 보여줘"` 또는 `get_team_rules`를 실행한다.
+3. `"진행 상황 보여줘"` 또는 `show_progress`를 실행한다.
+4. 게임 레포 경로와 체크리스트가 정상적으로 읽히는지 확인한다.
 
-   **질문 1 — 기획서**
-   > "게임 기획서 내용을 알려주세요. 장르, 핵심 기능, 기술 스택, 마일스톤 등을 자유롭게 적어주시면 됩니다."
+PM은 별도로 권한 전달을 검증한다.
 
-   **질문 2 — 내 파트**
-   > "본인이 담당하는 파트(시스템·기능 목록)를 알려주세요. 예: GA_Attack 구현, 인벤토리 UI, 네트워크 동기화 등"
+1. Discord 메시지 메타데이터의 `author.id`를 `invoker_id`로 사용한다.
+2. username이나 표시 이름을 `finish_meeting.invoker_id`로 전달하지 않는다.
+3. 테스트 포럼에서 회의 준비·완료 흐름을 한 번 실행한다.
 
-   두 답변을 받으면:
-   ```
-   create_plan({
-     spec_content: "<질문1 답변>",
-     my_part_content: "<질문2 답변>"
-   })
-   ```
-   → 기획서.md + 내파트.md 저장 후 컨텍스트 수집 → AI가 분석 →
-   ```
-   create_plan({
-     plan_markdown: "<분석 결과>",
-     checklist_markdown: "<체크리스트>"
-   })
-   ```
-   → 플랜.md + 체크리스트.md 생성 완료
+## 11. 실제 회의 흐름
 
-   > 기획서.md / 내파트.md가 이미 게임 레포에 있으면 이 단계는 생략하고 `create_plan`을 바로 호출해도 됨.
+### 회의 준비
 
-8. **게임 레포에 AGENTS.md 복사 (최초 1회)**:
+1. `prepare_meeting({ user_name })` 호출
+2. 체크리스트 완료 후보가 있으면 완료 항목 확인
+3. push된 커밋이 있으면 AI가 원문을 검토해 `commit_summary_markdown` 작성
+4. `prepare_meeting` 재호출
+5. 오늘 `[진행]` 회의가 있으면 댓글로 추가
+6. 없으면 `스크럼 회의 YYYY-MM-DD (N차)` 생성
 
-   team-mcp 레포의 `AGENTS.md`를 게임 레포 루트에 복사한다.
-   ```bash
-   copy C:\team-mcp\AGENTS.md C:\Users\...\GameProject\AGENTS.md
-   ```
-   이후 Claude Code · Codex가 게임 프로젝트에서 열릴 때 자동으로 읽어 툴 트리거 매핑이 동작한다.
-   팀 규칙(코드 스타일·커밋 규칙 등)이 있으면 이 파일 앞에 합쳐서 사용한다.
+서울 날짜 기준으로 오늘의 최신 `[진행]` 스레드만 사용한다. 어제 끝나지 않은 회의에는
+붙지 않는다.
 
-## Discord 사전 준비 (PM 1회)
+### 회의 완료
 
-`finish_meeting`/`prepare_meeting`이 동작하려면 Discord에 다음을 미리 만든다:
+1. `finish_meeting({ invoker_id })` 호출
+2. 오늘의 최신 `[진행]` 스레드 댓글을 AI가 분석
+3. `summary`, `action_items`와 함께 재호출
+4. Notion 회의록 생성
+5. 원본 스레드를 `[완료]`로 변경
+6. 같은 회차의 `[정리]` 스레드 생성
 
-1. **회의 포럼 채널** 1개 생성 (텍스트 채널 아님 — 채널 만들 때 "포럼" 유형 선택).
-2. 포럼 채널의 **태그 설정**에서 다음 3개 태그를 정확히 이 이름으로 생성:
-   - `진행` — prepare_meeting이 만든 회의 스레드에 자동 부착
-   - `완료` — finish_meeting이 회의 종료 시 부착
-   - `정리` — finish_meeting이 새로 만든 요약 스레드에 부착
+`create_action_issues: true`를 전달하면 승인 미리보기 없이 액션 아이템별 Jira Task를
+즉시 생성한다. 기본 흐름은 다음 단계의 미리보기와 확정을 사용한다.
 
-   태그명을 바꾸려면 `.env`의 `DISCORD_TAG_IN_PROGRESS`/`DISCORD_TAG_COMPLETED`/`DISCORD_TAG_SUMMARY`를 설정.
-3. 포럼 채널 ID를 `DISCORD_SCRUM_CHANNEL_ID`에 입력.
-4. 봇에 다음 권한 부여: `채널 보기`, `메시지 보내기`, `스레드에서 메시지 보내기`, `메시지 기록 보기`, `메시지 관리`(태그 변경에 필요).
+### Jira 반영
 
-## Notion 사전 준비 (PM/팀장만)
+1. `apply_meeting_to_backlog({ invoker_id })`로 회의와 Jira 컨텍스트 수집
+2. AI가 `proposals`를 작성해 재호출
+3. Discord에 백로그 업데이트 미리보기 게시
+4. PM/팀장이 미리보기를 확인
+5. `"백로그 변경 확정해줘"` 명령으로 `confirm: true` 호출
+6. Jira 일괄 반영 후 결과를 같은 미리보기 스레드에 게시
 
-`finish_meeting`이 동작하려면 Notion에 다음을 미리 만든다:
+같은 회의에서 후속 미리보기를 만들면 기존 미리보기 포스트의 댓글로 이어진다.
+승인 대기는 24시간 후 만료된다.
 
-1. **회의록 부모 페이지**: 일반 페이지 1개. ID를 `NOTION_PARENT_PAGE_ID`에 입력.
-2. **락 데이터베이스**: 다음 두 컬럼을 가진 DB:
-   - `Name` (기본 title 컬럼)
-   - `expires_at` (Date 타입)
+## 12. Channels 자동화 모드
 
-   DB ID를 `NOTION_LOCK_DB_ID`에 입력.
-3. Notion Integration 토큰을 두 페이지·DB 모두에 공유 권한 부여.
+Discord 메시지로 Claude Code를 깨워 MCP를 호출하려면 PM의 상시 실행 환경이 필요하다.
 
-## Channels 자동화 모드 (선택)
+1. Discord Developer Portal에서 Message Content Intent를 활성화한다.
+2. Claude Code Channels용 Discord 플러그인을 설치하고 페어링한다.
+3. 게임 레포 루트에서 백그라운드 Claude Code 세션을 실행한다.
+4. Channels allowlist에 명령 가능한 사용자만 등록한다.
 
-Discord 채널에 "회의 완료" 같은 한 줄을 입력하면 Claude가 자동으로 우리 MCP 툴을 호출하게 만드는 모드. PM 한 명의 머신에서 백그라운드 세션을 상시 운영해야 한다.
+시작 디렉토리는 게임 레포 루트여야 `AGENTS.md`와 프로젝트 파일을 읽을 수 있다.
+백그라운드 세션이 꺼져 있을 때 들어온 메시지는 처리되지 않을 수 있다.
 
-### 사전 준비 (PM 1회)
+## 13. 업데이트
 
-1. 디스코드 봇에 다음 권한·인텐트 부여:
-   - **Message Content Intent** 활성화 (Developer Portal → Bot 탭)
-   - 채널 권한: `View Channels`, `Send Messages`, `Send Messages in Threads`, `Read Message History`, `Add Reactions`, `Attach Files`
-   - 본 MCP 서버에서 이미 같은 봇 토큰을 사용 중이면 봇은 추가로 만들 필요 없음. 권한·인텐트만 보강.
-2. Claude Code v2.1.80+ 확인
-3. Channels Discord 플러그인 설치 + 페어링
-   ```bash
-   /plugin install discord@claude-plugins-official
-   /discord:configure <BOT_TOKEN>
-   # 봇과 DM해서 페어링 코드 받은 뒤
-   /discord:access pair <코드>
-   /discord:access policy allowlist
-   ```
-4. 게임 레포 디렉토리에서 백그라운드 상시 세션 시작:
-   ```bash
-   # macOS/Linux
-   tmux new -s team-mcp 'cd /path/to/EternalDreams && claude --channels plugin:discord@claude-plugins-official'
+```bash
+cd /path/to/team-mcp
+git pull
+npm install
+npm run build
+npx tsx src/smoke.ts
+```
 
-   # Windows
-   # 작업 스케줄러로 시작 시 다음 명령 등록 (cmd 창 유지):
-   # cd C:\path\to\EternalDreams && claude --channels plugin:discord@claude-plugins-official
-   ```
-   - 시작 디렉토리는 반드시 **게임 레포 루트**여야 한다 (`.claude/settings.json` + `AGENTS.md` 적용).
-5. 권한 중계 옵션: 도구 호출 승인을 Discord로 받고 싶으면 `claude/channel/permission` 활성화 (Channels 문서 참고).
+업데이트 후 AI 도구를 완전히 재시작한다.
 
-### 자동 모드의 한계
+## 14. 문제 해결
 
-- 백그라운드 세션이 꺼져 있을 때 디스코드 메시지는 큐잉되지 않고 사라진다.
-- 트리거 권한자(allowlist)에 등록된 ID만 명령을 보낼 수 있다.
-- Channels에서 들어오는 메시지의 `author.id`(Discord snowflake)를 그대로 `invoker_id` 인자로 사용해야 `ALLOWED_USERS` 검증과 일치한다. 처음 페어링 후 `finish_meeting` 한 번 시도해서 실제로 ID가 정확히 전달되는지 확인 권장.
+### `현재 브랜치에 upstream이 없습니다`
 
-### 의도 매핑 안내
+```bash
+git push -u origin <branch-name>
+```
 
-자동 모드를 안정적으로 쓰려면 **게임 레포의 `AGENTS.md`**에 트리거 매핑 섹션을 추가한다. 본 레포의 [examples/AGENTS.example.md](examples/AGENTS.example.md) 참고.
+### `오늘 진행 중인 회의 스레드가 없습니다`
 
-## 주의사항
+먼저 `prepare_meeting`을 실행한다. 어제의 `[진행]` 스레드는 재사용하지 않는다.
 
-- `.env`는 절대 git에 커밋하지 않음 (`.gitignore`에 포함됨)
-- PM/팀장이 아닌 경우 `NOTION_*`, `JIRA_*`, `ALLOWED_USERS`는 비워둠
-- `GAME_PROJECT_PATH`는 도구마다 다른 OS일 수 있으므로 호스트별 절대 경로 사용
-- Windows에서는 경로 구분자로 백슬래시 또는 슬래시 모두 허용
+### `권한 없음`
+
+`invoker_id`가 Discord username이 아닌 snowflake ID인지 확인하고, PM PC의
+`ALLOWED_USERS`에 포함됐는지 확인한다.
+
+### `포럼 태그를 찾을 수 없음`
+
+Discord 포럼에 `진행`, `완료`, `정리` 태그가 실제로 존재하는지 확인한다.
+
+### 코드 변경이 MCP에 반영되지 않음
+
+```bash
+npm run build
+```
+
+그 뒤 AI 도구를 완전히 재시작한다.
+
+### 백로그 승인 대기를 찾을 수 없음
+
+미리보기를 만든 MCP 환경과 확정 명령을 실행한 환경이 같은지 확인한다.
+`.scrum-state.json`은 로컬 상태 파일이다.
