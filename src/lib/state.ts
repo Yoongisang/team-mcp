@@ -39,6 +39,8 @@ export interface BacklogProposal {
 export interface PendingBacklogApproval {
   /** Discord 정리 스레드 ID — 봇이 미리보기 메시지를 게시한 스레드. */
   threadId: string;
+  /** 미리보기가 분석한 원본 완료 회의 스레드 ID. */
+  sourceMeetingThreadId?: string;
   /** 미리보기 메시지 ID — 게시 위치와 승인 대상을 추적한다. */
   messageId: string;
   /** 적용할 proposals 원본. */
@@ -56,6 +58,8 @@ export interface ScrumState {
   currentMeetingThreadId: string | null;
   /** 직전 회의 스레드 ID. finish_meeting이 클리어 직전 백업 → apply_meeting_to_backlog가 참조. */
   lastFinishedMeetingThreadId: string | null;
+  /** 직전 회의의 [정리] 스레드 ID. Jira 미리보기와 적용 결과는 이 스레드에 게시한다. */
+  lastFinishedMeetingSummaryThreadId: string | null;
   /** 사용자 확인 대기 중인 체크리스트 항목. finish_meeting에서 처리 후 클리어. */
   pendingConfirmations: PendingConfirmation[];
   /** apply_meeting_to_backlog Phase 2에서 저장, Phase 3에서 확인 후 클리어. */
@@ -72,6 +76,7 @@ const DEFAULT_STATE: ScrumState = {
   lastReportedUpstreamHeads: {},
   currentMeetingThreadId: null,
   lastFinishedMeetingThreadId: null,
+  lastFinishedMeetingSummaryThreadId: null,
   pendingConfirmations: [],
   pendingBacklogApproval: null,
   lastBacklogPreviewThreadId: null,
@@ -100,6 +105,8 @@ export async function loadState(): Promise<ScrumState> {
           : {},
       currentMeetingThreadId: parsed.currentMeetingThreadId ?? null,
       lastFinishedMeetingThreadId: parsed.lastFinishedMeetingThreadId ?? null,
+      lastFinishedMeetingSummaryThreadId:
+        parsed.lastFinishedMeetingSummaryThreadId ?? null,
       pendingConfirmations: Array.isArray(parsed.pendingConfirmations) ? parsed.pendingConfirmations : [],
       pendingBacklogApproval: parsed.pendingBacklogApproval ?? null,
       lastBacklogPreviewThreadId: parsed.lastBacklogPreviewThreadId ?? null,

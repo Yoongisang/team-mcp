@@ -3,6 +3,7 @@ import { z } from "zod";
 import { config, requireConfig } from "../config.js";
 import {
   DiscordClient,
+  discordDisplayName,
   resolveForumTagIds,
   type DiscordMessage,
 } from "../lib/discord.js";
@@ -67,21 +68,20 @@ const Args = z.object({
   invoker_id: z.string().min(1),
   proposals: z.array(ProposalSchema).optional(),
   confirm: z.boolean().optional(),
-  preview_thread_id: z.string().optional(),
 });
 
 export const applyMeetingToBacklogTool: Tool = {
   name: "apply_meeting_to_backlog",
   description:
-    "PM/팀장 전용. 회의 댓글을 분석해 새로 결정된 실행 항목은 기본적으로 새 Jira 이슈로 생성하고, " +
+    "PM/팀장 전용. finish_meeting 완료 후 호출한다. 회의 댓글을 분석해 새로 결정된 실행 항목은 기본적으로 새 Jira 이슈로 제안하고, " +
     "기존 이슈의 담당자·기한·스프린트·상태를 명시적으로 바꾸기로 한 경우에만 기존 이슈를 수정한다. " +
     "3단계 호출:\n" +
     "  [Phase 1] 인자 없이(invoker_id만) 호출 → 백로그 전체 + 회의 댓글 컨텍스트 반환. LLM은 이를 분석해 proposals 작성.\n" +
-    "  [Phase 2] proposals 인자 전달 → Discord 정리 스레드에 미리보기 게시. state에 승인 대기 저장.\n" +
-    "  [Phase 3] confirm: true 전달 → 일괄 적용. invoker_id가 ALLOWED_USERS면 즉시 적용 (텍스트 명령 승인).\n" +
+    "  [Phase 2] proposals 인자 전달 → finish_meeting이 만든 Discord [정리] 스레드에 Jira 반영 미리보기 게시. 담당자 표시 이름의 Jira 매칭 결과도 보여주고 승인 대기 저장.\n" +
+    "  [Phase 3] confirm: true 전달 → 승인된 내용만 Jira에 일괄 적용하고 같은 [정리] 스레드에 결과 게시.\n" +
     "create/schedule 액션에 dueDate가 있으면 자동으로 해당 마감일을 포함하는 스프린트로 이동시킨다 (별도 move_to_sprint 불필요). " +
-    "회의 종료 후 finish_meeting 다음에 호출하며, 회의 스레드는 state.currentMeetingThreadId 기준. " +
-    "finish_meeting이 이미 currentMeetingThreadId를 클리어했다면 state.lastPrepareMeetingAt 흔적이 없으니 사용자에게 prepare → finish 순으로 재진행을 안내한다.",
+    "assigneeName은 회의 댓글의 Discord 표시 이름을 그대로 사용하며 Jira 표시 이름으로 조회해 배정한다. " +
+    "finish_meeting 전에는 호출하지 않는다.",
   inputSchema: {
     type: "object",
     properties: {
@@ -151,11 +151,6 @@ export const applyMeetingToBacklogTool: Tool = {
           "[Phase 3 전용] true이면 state의 pendingBacklogApproval을 적용. " +
           "PM/팀장이 미리보기를 확인한 뒤 텍스트 명령으로 호출.",
       },
-      preview_thread_id: {
-        type: "string",
-        description:
-          "[Phase 2 선택] 기존 백로그 업데이트 미리보기 스레드 ID. 전달하면 새 포럼 포스트 대신 해당 스레드 댓글로 미리보기를 게시.",
-      },
     },
     required: ["invoker_id"],
     additionalProperties: false,
@@ -164,12 +159,13 @@ export const applyMeetingToBacklogTool: Tool = {
 
 function formatMessage(m: DiscordMessage): string {
   const ts = m.timestamp.slice(0, 19).replace("T", " ");
-  return `[${ts}] @${m.author.username}: ${m.content}`;
+  return `[${ts}] ${discordDisplayName(m)}: ${m.content}`;
 }
 
-function renderProposalsPreview(
+export function renderProposalsPreview(
   proposals: BacklogProposal[],
   issueMap: Map<string, { summary: string; status: string }>,
+  assigneeMatches: Map<string, string | null>,
 ): string {
   if (proposals.length === 0) return "(제안 없음)";
   return proposals
@@ -187,7 +183,14 @@ function renderProposalsPreview(
       if (p.summary && p.action !== "create") parts.push(`   제목: ${p.summary}`);
       if (p.issueType) parts.push(`   이슈 타입: ${p.issueType}`);
       if (p.labels?.length) parts.push(`   라벨: ${p.labels.join(", ")}`);
-      if (p.assigneeName) parts.push(`   담당자: ${p.assigneeName}`);
+      if (p.assigneeName) {
+        const matched = assigneeMatches.get(p.assigneeName);
+        parts.push(
+          matched
+            ? `   담당자: ${p.assigneeName} → Jira ${matched} (매칭 확인)`
+            : `   담당자: ${p.assigneeName} → Jira 매칭 실패 (승인 시 이 항목은 적용하지 않음)`,
+        );
+      }
       if (p.startDate) parts.push(`   시작일: ${p.startDate}`);
       if (p.dueDate) parts.push(`   기한: ${p.dueDate}`);
       if (p.sprintId) parts.push(`   스프린트 ID: ${p.sprintId}`);
@@ -248,6 +251,25 @@ export async function applyMeetingToBacklog(raw: unknown) {
       };
     }
 
+    if (
+      state.currentMeetingThreadId ||
+      !pending.sourceMeetingThreadId ||
+      pending.sourceMeetingThreadId !== state.lastFinishedMeetingThreadId
+    ) {
+      state.pendingBacklogApproval = null;
+      await saveState(state);
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text:
+              "승인 대상 회의가 현재 상태와 일치하지 않아 취소했습니다. " +
+              "회의 완료 후 '진행' 단계부터 다시 실행하세요.",
+          },
+        ],
+      };
+    }
+
     // 텍스트 명령 승인 방식:
     // checkPermission(args.invoker_id, ...)가 함수 진입 시 이미 호출됐으므로,
     // confirm: true로 도달한 이상 invoker는 ALLOWED_USERS 멤버임이 보장됨.
@@ -295,6 +317,17 @@ export async function applyMeetingToBacklog(raw: unknown) {
         switch (p.action) {
           case "create": {
             if (!p.summary) throw new Error("summary 누락");
+            const assignee = p.assigneeName
+              ? await jira.findUserByDisplayName(
+                  p.assigneeName,
+                  jiraProject,
+                )
+              : null;
+            if (p.assigneeName && !assignee) {
+              throw new Error(
+                `Discord 표시 이름 '${p.assigneeName}'과 일치하는 Jira 담당자를 찾지 못함`,
+              );
+            }
             const issue = await jira.createIssue({
               projectKey: jiraProject,
               summary: p.summary,
@@ -303,29 +336,12 @@ export async function applyMeetingToBacklog(raw: unknown) {
               labels: ["scrum-action-item", ...(p.labels ?? [])],
               startDate: p.startDate,
               dueDate: p.dueDate,
+              assigneeAccountId: assignee?.accountId,
             });
             const parts: string[] = [`생성 ${issue.url}`];
             if (p.startDate) parts.push(`시작 ${p.startDate}`);
             if (p.dueDate) parts.push(`기한 ${p.dueDate}`);
-
-            if (p.assigneeName) {
-              try {
-                const user = await jira.findUserByDisplayName(
-                  p.assigneeName,
-                  jiraProject,
-                );
-                if (!user) {
-                  parts.push(`담당자 매칭 실패(${p.assigneeName})`);
-                } else {
-                  await jira.updateIssue(issue.key, {
-                    assigneeAccountId: user.accountId,
-                  });
-                  parts.push(`담당자 ${user.displayName}`);
-                }
-              } catch (e) {
-                parts.push(`담당자 적용 실패(${p.assigneeName}: ${e})`);
-              }
-            }
+            if (assignee) parts.push(`담당자 ${assignee.displayName}`);
 
             if (p.sprintId) {
               await jira.moveIssuesToSprint(p.sprintId, [issue.key]);
@@ -453,13 +469,46 @@ export async function applyMeetingToBacklog(raw: unknown) {
 
   // ── Phase 2: 미리보기 게시 + 승인 대기 ─────────────────────────────
   if (args.proposals && args.proposals.length > 0) {
-    if (!state.currentMeetingThreadId && !state.lastPrepareMeetingAt) {
+    const sourceThreadId = state.lastFinishedMeetingThreadId;
+    let previewThreadId = state.lastFinishedMeetingSummaryThreadId;
+    // 구버전 finish_meeting이 정리 스레드 ID를 state에 저장하지 않은 경우,
+    // 같은 회차 이름과 [정리] 태그로 기존 스레드를 찾아 1회 마이그레이션한다.
+    if (sourceThreadId && !previewThreadId) {
+      try {
+        const sourceThread = await discord.getChannel(sourceThreadId);
+        const expectedSummaryName = sourceThread.name?.replace(
+          /^스크럼 회의\s+/,
+          "스크럼 회의 정리 ",
+        );
+        const forum = await discord.getChannel(forumId);
+        const [summaryTagId] = resolveForumTagIds(forum, [
+          config.discord.tagSummary,
+        ]);
+        const threads = await discord.listForumThreads(forumId);
+        previewThreadId = threads.find(
+          (thread) =>
+            thread.name === expectedSummaryName &&
+            thread.applied_tags?.includes(summaryTagId!),
+        )?.id ?? null;
+        if (previewThreadId) {
+          state.lastFinishedMeetingSummaryThreadId = previewThreadId;
+          await saveState(state);
+        }
+      } catch (e) {
+        console.error(
+          "[apply_meeting_to_backlog] summary thread migration lookup failed:",
+          e,
+        );
+      }
+    }
+    if (state.currentMeetingThreadId || !sourceThreadId || !previewThreadId) {
       return {
         content: [
           {
             type: "text" as const,
             text:
-              "회의 컨텍스트가 없습니다. prepare_meeting → finish_meeting → apply_meeting_to_backlog 순서로 진행하세요.",
+              "완료된 회의와 [정리] 스레드 컨텍스트가 없습니다. " +
+              "prepare_meeting → finish_meeting → 진행 순서로 호출하세요.",
           },
         ],
       };
@@ -476,84 +525,47 @@ export async function applyMeetingToBacklog(raw: unknown) {
       console.error("[apply_meeting_to_backlog] backlog refetch failed:", e);
     }
 
+    // Discord 표시 이름을 Jira 표시 이름으로 미리 조회해 승인 전에 매칭 결과를 보여준다.
+    const assigneeMatches = new Map<string, string | null>();
+    const assigneeNames = [
+      ...new Set(
+        args.proposals
+          .map((p) => p.assigneeName?.trim())
+          .filter((name): name is string => !!name),
+      ),
+    ];
+    for (const name of assigneeNames) {
+      const user = await jira.findUserByDisplayName(name, jiraProject);
+      assigneeMatches.set(name, user?.displayName ?? null);
+    }
+
     const today = new Date().toISOString().slice(0, 10);
     const previewBody = [
-      `# 📋 백로그 업데이트 미리보기 (${today})`,
+      `## 📋 Jira 반영 미리보기 (${today})`,
       "",
       `회의에서 다음 ${args.proposals.length}건의 변경을 제안합니다.`,
-      `**검토 후 PM/팀장은 "백로그 변경 확정해줘" 라고 명령해주세요.** 권한 있는 사용자만 확정 가능합니다.`,
+      `**아직 Jira에는 반영하지 않았습니다.**`,
+      `검토 후 PM/팀장은 "승인" 또는 "백로그 변경 확정해줘"라고 명령해주세요.`,
       "",
-      renderProposalsPreview(args.proposals, issueMap),
+      renderProposalsPreview(args.proposals, issueMap, assigneeMatches),
       "",
       "---",
       `_24시간 내 확정 명령이 없으면 만료됩니다._`,
     ].join("\n");
 
-    const forum = await discord.getChannel(forumId);
-    const [summaryTagId] = resolveForumTagIds(forum, [
-      config.discord.tagSummary,
-    ]);
-
-    const sourceThreadId =
-      state.currentMeetingThreadId ?? state.lastFinishedMeetingThreadId;
-    const canReuseStoredPreview =
-      !!sourceThreadId &&
-      state.lastBacklogPreviewSourceThreadId === sourceThreadId;
-    const requestedThreadId =
-      args.preview_thread_id ??
-      (canReuseStoredPreview ? state.pendingBacklogApproval?.threadId : undefined) ??
-      (canReuseStoredPreview ? state.lastBacklogPreviewThreadId : undefined);
-
-    let previewThreadId: string;
-    let previewThreadName: string;
-    let previewMessageIds: string[];
-    let postedAsReply = false;
-
-    if (requestedThreadId) {
-      try {
-        const existingThread = await discord.getChannel(requestedThreadId);
-        previewMessageIds = await discord.postChunked(requestedThreadId, previewBody);
-        previewThreadId = requestedThreadId;
-        previewThreadName = existingThread.name ?? requestedThreadId;
-        postedAsReply = true;
-      } catch (e) {
-        console.error(
-          `[apply_meeting_to_backlog] preview thread reuse failed (${requestedThreadId}); creating a new preview thread:`,
-          e,
-        );
-        const { thread, followupMessageIds } = await discord.createForumThread(
-          forumId,
-          `백로그 업데이트 미리보기 ${today}`,
-          previewBody,
-          [summaryTagId!],
-        );
-        previewThreadId = thread.id;
-        previewThreadName = thread.name;
-        previewMessageIds = followupMessageIds.length > 0
-          ? followupMessageIds
-          : [thread.id];
-      }
-    } else {
-      const { thread, followupMessageIds } = await discord.createForumThread(
-        forumId,
-        `백로그 업데이트 미리보기 ${today}`,
-        previewBody,
-        [summaryTagId!],
-      );
-      previewThreadId = thread.id;
-      previewThreadName = thread.name;
-      previewMessageIds = followupMessageIds.length > 0
-        ? followupMessageIds
-        : [thread.id];
-    }
+    const summaryThread = await discord.getChannel(previewThreadId);
+    const previewMessageIds = await discord.postChunked(
+      previewThreadId,
+      previewBody,
+    );
 
     // 메시지 ID는 추적용으로 보관 (향후 결과 게시 위치 등에 활용 가능).
-    // ✅ 리액션 자동 부착은 제거 — 텍스트 명령 승인 방식으로 전환.
     const previewMessageId = previewMessageIds[previewMessageIds.length - 1]!;
 
     // state에 승인 대기 저장
     const pending: PendingBacklogApproval = {
       threadId: previewThreadId,
+      sourceMeetingThreadId: sourceThreadId,
       messageId: previewMessageId,
       proposals: args.proposals,
       createdAt: new Date().toISOString(),
@@ -569,11 +581,11 @@ export async function applyMeetingToBacklog(raw: unknown) {
           type: "text" as const,
           text:
             `📋 미리보기 게시 완료\n` +
-            `  방식: ${postedAsReply ? "기존 미리보기 스레드 댓글" : "새 미리보기 스레드"}\n` +
-            `  Discord 스레드: ${previewThreadName} (${previewThreadId})\n` +
+            `  방식: 회의 [정리] 스레드 댓글\n` +
+            `  Discord 스레드: ${summaryThread.name ?? previewThreadId} (${previewThreadId})\n` +
             `  제안 수: ${args.proposals.length}건\n\n` +
             `다음 단계:\n` +
-            `  1. PM/팀장이 "백로그 변경 확정해줘" 라고 명령\n` +
+            `  1. PM/팀장이 "승인" 또는 "백로그 변경 확정해줘"라고 명령\n` +
             `  2. 자동으로 일괄 적용 + 결과 게시 (스케줄 액션은 마감일 기준 스프린트로 자동 배정)\n\n` +
             `_24시간 후 자동 만료._`,
         },
@@ -582,19 +594,17 @@ export async function applyMeetingToBacklog(raw: unknown) {
   }
 
   // ── Phase 1: 컨텍스트 반환 ─────────────────────────────────────────
-  // currentMeetingThreadId 우선, 없으면 lastFinishedMeetingThreadId 사용
-  // (finish_meeting 직후 호출되는 일반적인 경우 대응)
-  const threadId =
-    state.currentMeetingThreadId ?? state.lastFinishedMeetingThreadId;
-  if (!threadId) {
+  // Jira 제안은 finish_meeting으로 닫힌 직전 회의만 대상으로 한다.
+  const threadId = state.lastFinishedMeetingThreadId;
+  if (state.currentMeetingThreadId || !threadId) {
     return {
       content: [
         {
           type: "text" as const,
           text:
-            "회의 스레드를 찾을 수 없습니다.\n" +
+            "완료된 회의 스레드를 찾을 수 없거나 아직 진행 중인 회의가 있습니다.\n" +
             "prepare_meeting → (회의 진행) → finish_meeting → apply_meeting_to_backlog 순서로 진행하세요.\n" +
-            "또는 직전 회의 사이클의 lastFinishedMeetingThreadId가 다음 prepare_meeting으로 덮였을 수 있습니다.",
+            "회의 완료 전에는 Jira 미리보기를 만들지 않습니다.",
         },
       ],
     };
@@ -657,7 +667,10 @@ export async function applyMeetingToBacklog(raw: unknown) {
     "```",
     "",
     "분석 가이드:",
+    "  - 회의 댓글의 `이름:` 접두사는 Discord 서버 별명 또는 표시 이름이다. Jira 담당자 이름의 기준으로 그대로 사용하라.",
     "  - **새로 수행해야 하는 작업·후속 조치·피드백 반영·추가 수정은 기본적으로 `create`.** 관련된 기존 이슈가 있어도 댓글로 대체하지 말고 독립된 새 액션 이슈를 발행하라.",
+    "  - 새 작업의 담당자가 댓글 작성자이거나 본문에 명시되어 있으면 `create.assigneeName`에 해당 Discord 표시 이름을 정확히 넣어라.",
+    "    담당자가 불명확할 때만 assigneeName을 생략하고, username이나 ID를 임의로 사용하지 말 것.",
     "  - `assign`, `schedule`, `move_to_sprint`, `reopen`은 회의에서 기존 이슈 자체의 담당자·일정·스프린트·상태를 바꾸기로 명확히 결정한 경우에만 사용하라.",
     "  - `comment_only`는 사용자가 '기존 이슈에 기록만 남겨라'라고 명시한 경우에만 사용한다. 실행할 일이 포함된 발화에는 사용하지 말 것.",
     "  - 기존 이슈를 수정할 때의 매칭 기준은 작업 내용(summary)뿐이다. 현재 담당자나 발화자는 매칭 신호로 사용하지 말 것.",
@@ -672,7 +685,7 @@ export async function applyMeetingToBacklog(raw: unknown) {
     "  - `create` proposal의 `comment`에는 회의 출처를 넣어 새 이슈 description으로 남겨라.",
     "  - 완료 이슈의 상태 자체를 다시 진행으로 돌리기로 했으면 `reopen`. 별도 추가 작업이나 재작업이면 새 `create` 이슈를 발행하라.",
     "",
-    "재호출 시 Phase 2가 실행되어 Discord 정리 스레드에 미리보기를 게시하고 PM/팀장의 텍스트 확정을 대기한다.",
+    "재호출 시 Phase 2가 실행되어 finish_meeting이 만든 Discord [정리] 스레드에 Jira 미리보기와 담당자 매칭 결과를 게시하고 PM/팀장의 텍스트 승인을 대기한다.",
   ].join("\n");
 
   return { content: [{ type: "text" as const, text }] };

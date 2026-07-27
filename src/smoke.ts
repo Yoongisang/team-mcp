@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
-import type { DiscordThread } from "./lib/discord.js";
+import {
+  discordDisplayName,
+  type DiscordMessage,
+  type DiscordThread,
+} from "./lib/discord.js";
 import {
   gitReportTrackingKey,
   matchesGitAuthor,
@@ -11,6 +15,8 @@ import {
   meetingThreadName,
   nextMeetingSequence,
 } from "./lib/meeting-threads.js";
+import { renderProposalsPreview } from "./tools/apply-meeting-to-backlog.js";
+import { finishMeetingTool } from "./tools/finish-meeting.js";
 
 const progressTag = "progress";
 const completedTag = "completed";
@@ -41,6 +47,74 @@ const threads: DiscordThread[] = [
     applied_tags: [progressTag],
   },
 ];
+
+const messageBase: Omit<DiscordMessage, "author" | "member"> = {
+  id: "message",
+  channel_id: "thread",
+  content: "status",
+  timestamp: "2026-07-27T12:00:00.000Z",
+};
+assert.equal(
+  discordDisplayName({
+    ...messageBase,
+    author: {
+      id: "user",
+      username: "sawsd",
+      global_name: "윤기상",
+    },
+    member: { nick: "팀장 윤기상" },
+  }),
+  "팀장 윤기상",
+);
+assert.equal(
+  discordDisplayName({
+    ...messageBase,
+    author: {
+      id: "user",
+      username: "sawsd",
+      global_name: "윤기상",
+    },
+  }),
+  "윤기상",
+);
+assert.equal(
+  discordDisplayName({
+    ...messageBase,
+    author: { id: "user", username: "sawsd" },
+  }),
+  "sawsd",
+);
+
+const jiraPreview = renderProposalsPreview(
+  [
+    {
+      action: "create",
+      summary: "세이브 시스템 테스트",
+      assigneeName: "윤기상",
+    },
+    {
+      action: "create",
+      summary: "환경 코드 분석",
+      assigneeName: "표시 이름 불일치",
+    },
+  ],
+  new Map(),
+  new Map([
+    ["윤기상", "윤기상"],
+    ["표시 이름 불일치", null],
+  ]),
+);
+assert.match(jiraPreview, /윤기상 → Jira 윤기상 \(매칭 확인\)/);
+assert.match(jiraPreview, /표시 이름 불일치 → Jira 매칭 실패/);
+
+const finishProperties = (
+  finishMeetingTool.inputSchema as {
+    properties?: Record<string, unknown>;
+  }
+).properties ?? {};
+assert.equal("create_action_issues" in finishProperties, false);
+assert.equal("completed_task_names" in finishProperties, false);
+assert.equal("sprint_end_date" in finishProperties, false);
 
 assert.equal(
   currentMeetingDate(new Date("2026-07-26T16:00:00.000Z")),

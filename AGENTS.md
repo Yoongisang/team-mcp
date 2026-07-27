@@ -34,6 +34,8 @@ Claude Code · Codex · Cursor 어디서든 동일하게 동작하는 9개 툴�
 | "방향 변경: ..." / "...로 전환" | `change_direction` |
 | "회의 준비" / "스크럼" | `prepare_meeting({ user_name: 메시지 작성자 })` |
 | "회의 완료" / "회의 마침" | `finish_meeting({ invoker_id: 메시지 작성자 Discord ID })` |
+| 회의 완료 후 "진행" / "Jira 진행" | `apply_meeting_to_backlog({ invoker_id })` 컨텍스트 분석 후 `proposals`로 재호출 |
+| Jira 미리보기 후 "승인" / "백로그 변경 확정" | `apply_meeting_to_backlog({ invoker_id, confirm: true })` |
 | "진행 상황" / "진척" | `show_progress` |
 | "팀 규칙" / "AGENTS" | `get_team_rules` |
 
@@ -60,6 +62,8 @@ Channels 플러그인을 통해 Discord 메시지가 컨텍스트로 들어온 �
   커밋은 `GIT_REPORT_REF`(기본 `origin/develop`)에 반영된 것 중 해당 작성자의 내역만 수집한다.
 - `finish_meeting`의 `invoker_id`: 메시지 작성자의 Discord **user ID(snowflake, 긴 숫자)** 를 그대로 사용.
   절대 username을 넣지 말 것 (`ALLOWED_USERS`는 ID 기반 검증).
+- `apply_meeting_to_backlog`의 `invoker_id`도 동일한 Discord user ID를 사용한다.
+- 회의 댓글 작성자는 서버 별명 → Discord 표시 이름 → username 순으로 표기하며, Jira `assigneeName`에는 이 표시 이름을 그대로 사용한다.
 - 메시지 메타데이터에 ID가 명시적으로 보이지 않으면, 작업을 시도하지 말고 먼저 작성자 ID를 묻는다.
 
 ---
@@ -76,10 +80,16 @@ Channels 플러그인을 통해 Discord 메시지가 컨텍스트로 들어온 �
 4. **finish_meeting** (인자 없이 1차) → 오늘 날짜의 가장 최근 `[진행]` 스레드 댓글 수집 → AI가 요약 분석
 5. **finish_meeting** (summary + action_items로 2차) →
    - Notion 회의록 페이지 생성
-   - `create_action_issues: true`인 경우에만 Jira 이슈 즉시 생성 (기본은 다음 미리보기·확정 흐름 사용)
    - 원본 스레드 태그 `[진행]` → `[완료]`
-   - 같은 회차가 표시된 새 `[정리]` 태그 요약 스레드 생성 (Notion·Jira 링크 포함)
-6. **apply_meeting_to_backlog** → 새 실행 항목은 기본적으로 새 Jira Task로 제안하고, 미리보기 확인 후 발행
+   - 같은 회차가 표시된 새 `[정리]` 태그 요약 스레드 생성 (Notion 링크 포함)
+   - **이 단계에서는 Jira를 생성·수정하지 않는다**
+6. 회의 완료 후 사용자가 **"진행"**이라고 하면 **apply_meeting_to_backlog** 1·2단계를 실행한다.
+   - 회의 댓글과 Jira 백로그를 분석해 새 실행 항목을 기본적으로 새 Jira Task로 제안
+   - Discord 표시 이름을 `assigneeName`으로 사용해 Jira 표시 이름과 매칭
+   - Jira 반영 예시와 담당자 매칭 결과를 방금 만든 `[정리]` 스레드 댓글로 게시
+   - 아직 Jira에는 반영하지 않고 승인 대기
+7. 사용자가 미리보기를 확인하고 **"승인"** 또는 **"백로그 변경 확정"**이라고 하면 `confirm: true`로 Jira에 반영한다.
+   - Jira 이슈 생성·수정과 담당자 배정을 수행하고 결과를 같은 `[정리]` 스레드에 게시
    - 기존 이슈에는 담당자·일정·스프린트·상태 변경을 명시적으로 결정한 경우에만 직접 반영
    - 단순 `comment_only`는 사용자가 기존 이슈에 기록만 남기라고 명시한 경우로 제한
 
@@ -95,8 +105,9 @@ Channels 플러그인을 통해 Discord 메시지가 컨텍스트로 들어온 �
 
 ## 안전 가이드
 
-- `finish_meeting`은 비가역 작업(태그 변경, Notion·Jira 작성)을 포함한다.
+- `finish_meeting`은 비가역 작업(Discord 태그 변경·정리 스레드 생성, Notion 작성)을 포함하지만 Jira에는 쓰지 않는다.
   Discord 메시지로 트리거된 경우라도 결과를 채널에 회신해 사용자가 확인할 수 있게 한다.
+- `apply_meeting_to_backlog`는 Phase 2 미리보기까지 Jira 읽기만 수행하고, 사용자가 승인한 Phase 3에서만 Jira 생성·수정·담당자 배정을 수행한다.
 - 원본 댓글은 **삭제하지 않는다** — `[완료]` 태그로 보존된다.
 - 락 충돌(`다른 처리 진행 중`) 에러를 받으면 자동 재시도하지 말고 채널에 그대로 알려준다.
 - `ALLOWED_USERS`에 없는 사용자가 `finish_meeting`을 시도하면 `권한 없음` 에러가 난다. PM에게 안내하라.

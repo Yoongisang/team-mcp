@@ -6,8 +6,26 @@ export interface DiscordMessage {
   id: string;
   channel_id: string;
   content: string;
-  author: { id: string; username: string; bot?: boolean };
+  author: {
+    id: string;
+    username: string;
+    global_name?: string | null;
+    bot?: boolean;
+  };
+  member?: { nick?: string | null };
   timestamp: string;
+}
+
+/**
+ * Discord에서 사람에게 보이는 이름을 반환한다.
+ * 서버 별명 → 계정 표시 이름 → 사용자명 순으로 fallback 한다.
+ */
+export function discordDisplayName(message: DiscordMessage): string {
+  return (
+    message.member?.nick?.trim() ||
+    message.author.global_name?.trim() ||
+    message.author.username
+  );
 }
 
 export interface ForumTag {

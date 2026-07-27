@@ -78,6 +78,8 @@ export class JiraClient {
     dueDate?: string;
     /** YYYY-MM-DD. customfield_10015 (Start date). */
     startDate?: string;
+    /** Jira 사용자 accountId. 새 이슈 생성 시 담당자를 원자적으로 배정한다. */
+    assigneeAccountId?: string;
   }): Promise<CreatedIssue> {
     const description = opts.description
       ? {
@@ -101,6 +103,9 @@ export class JiraClient {
     if (opts.labels?.length) fields.labels = opts.labels;
     if (opts.dueDate) fields.duedate = opts.dueDate;
     if (opts.startDate) fields.customfield_10015 = opts.startDate;
+    if (opts.assigneeAccountId) {
+      fields.assignee = { accountId: opts.assigneeAccountId };
+    }
 
     const data = (await this.request("/rest/api/3/issue", {
       method: "POST",
@@ -417,7 +422,8 @@ export class JiraClient {
 
   /**
    * 표시 이름(displayName)으로 사용자 검색 → accountId 반환.
-   * 동명이인은 첫 번째 매치 사용. 없으면 null.
+   * 정확히 일치하는 사용자를 우선하며, 검색 결과가 하나뿐일 때만 fallback 한다.
+   * 여러 후보 중 임의의 첫 사용자를 배정하지 않는다.
    */
   async findUserByDisplayName(
     name: string,
@@ -430,9 +436,12 @@ export class JiraClient {
         )}&project=${projectKey}&maxResults=10`,
       )) as Array<{ accountId: string; displayName: string }>;
       if (data.length === 0) return null;
-      // displayName 정확 매치 우선
-      const exact = data.find((u) => u.displayName === name);
-      return exact ?? data[0]!;
+      const normalized = name.trim().toLocaleLowerCase();
+      const exact = data.find(
+        (u) => u.displayName.trim().toLocaleLowerCase() === normalized,
+      );
+      if (exact) return exact;
+      return data.length === 1 ? data[0]! : null;
     } catch {
       return null;
     }
