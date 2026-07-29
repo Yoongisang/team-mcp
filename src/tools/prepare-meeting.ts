@@ -233,6 +233,7 @@ function renderCommitReviewContext(
   userName: string,
   gitSource: {
     branch: string;
+    baseRef: string;
     upstream: string;
     reportAuthor: string;
     previousReportedHead: string | null;
@@ -265,7 +266,7 @@ function renderCommitReviewContext(
     "# 스크럼 커밋 요약 작성 컨텍스트",
     `- 보고자: ${userName}`,
     `- Git 작성자: ${gitSource.reportAuthor}`,
-    `- Git 기준: ${gitSource.upstream}에 반영된 개인 커밋`,
+    `- Git 기준: ${gitSource.baseRef} 이후 ${gitSource.upstream}에 push된 개인 커밋`,
     `- 기간: ${period}`,
     `- 커밋 수: ${commits.length}`,
     `- push되지 않아 제외된 로컬 커밋: ${gitSource.unpushedCount}`,
@@ -453,7 +454,7 @@ export async function prepareMeeting(raw: unknown) {
   const report = [
     `## ${user_name} 스크럼 보고`,
     `_기간: ${periodLabel}_`,
-    `_Git: ${pushedLog.upstream} / 작성자 ${pushedLog.reportAuthor}_`,
+    `_Git: ${pushedLog.upstream} (비교 기준 ${pushedLog.baseRef}) / 작성자 ${pushedLog.reportAuthor}_`,
     "",
     `### 변경 요약 (${commits.length}커밋)`,
     commitSummaryBlock,

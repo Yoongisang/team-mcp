@@ -59,7 +59,8 @@ Channels 플러그인을 통해 Discord 메시지가 컨텍스트로 들어온 �
 
 - `prepare_meeting`의 `user_name`: 메시지 작성자의 Discord 표시 이름(또는 username) 그대로 사용.
   Discord 보고자 표시와 Git 작성자 매칭에 사용한다. 이름이 다르면 `GIT_AUTHOR_MAP`을 사용하거나 `git_author`를 명시한다.
-  커밋은 `GIT_REPORT_REF`(기본 `origin/develop`)에 반영된 것 중 해당 작성자의 내역만 수집한다.
+  커밋은 `GIT_REPORT_REF`(기본 `origin/develop`) 이후 현재 브랜치 upstream에 push된 것 중 해당 작성자의 내역만 수집한다.
+  `GIT_REPORT_REF`는 작업 범위의 시작점이며, push 여부는 현재 브랜치 upstream으로 판정한다.
 - `finish_meeting`의 `invoker_id`: 메시지 작성자의 Discord **user ID(snowflake, 긴 숫자)** 를 그대로 사용.
   절대 username을 넣지 말 것 (`ALLOWED_USERS`는 ID 기반 검증).
 - `apply_meeting_to_backlog`의 `invoker_id`도 동일한 Discord user ID를 사용한다.

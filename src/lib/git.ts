@@ -20,6 +20,7 @@ export interface Commit {
 export interface PushedCommitLog {
   commits: Commit[];
   branch: string;
+  baseRef: string;
   upstream: string;
   upstreamHead: string;
   previousReportedHead: string | null;
@@ -55,6 +56,13 @@ export function gitReportTrackingKey(
   author: string,
 ): string {
   return `${ref}::${normalizeIdentity(author)}`;
+}
+
+export function initialGitReportRevision(
+  baseRef: string,
+  upstream: string,
+): string {
+  return baseRef === upstream ? upstream : `${baseRef}..${upstream}`;
 }
 
 function parseCommitLog(stdout: string): Commit[] {
@@ -95,8 +103,9 @@ function gitFailure(error: unknown, cwd: string): Error {
 }
 
 /**
- * 게임 레포의 보고 기준 ref에 반영된 커밋 중 지정한 Git 작성자의 것만 반환한다.
- * 마지막 보고 HEAD는 ref + 작성자별로 독립 추적한다.
+ * 게임 레포의 현재 브랜치 upstream에 push된 커밋 중 지정한 Git 작성자의 것만 반환한다.
+ * 보고 기준 ref는 작업 범위의 시작점으로만 사용하고, push 여부는 upstream으로 판정한다.
+ * 마지막 보고 HEAD는 upstream + 작성자별로 독립 추적한다.
  */
 export async function gitPushedLog(opts: {
   author: string;
@@ -114,37 +123,49 @@ export async function gitPushedLog(opts: {
       );
     }
 
-    let upstream = opts.ref?.trim() ?? "";
-    if (upstream) {
-      try {
-        await runGit(cwd, ["rev-parse", "--verify", upstream]);
-      } catch {
-        throw new Error(
-          `Git 보고 기준 ref '${upstream}'를 찾을 수 없습니다. ` +
-            "`git fetch` 후 GIT_REPORT_REF 설정을 확인하세요.",
-        );
-      }
-    } else {
-      try {
-        upstream = await runGit(cwd, [
-          "rev-parse",
-          "--abbrev-ref",
-          "--symbolic-full-name",
-          "@{upstream}",
-        ]);
-      } catch {
-        throw new Error(
-          `현재 브랜치 '${branch}'에 upstream이 없습니다. ` +
-            "`git push -u <remote> <branch>`로 원격 추적 브랜치를 설정한 뒤 다시 시도하세요.",
-        );
-      }
+    const baseRef = opts.ref?.trim() || "origin/develop";
+    try {
+      await runGit(cwd, ["rev-parse", "--verify", baseRef]);
+    } catch {
+      throw new Error(
+        `Git 보고 기준 ref '${baseRef}'를 찾을 수 없습니다. ` +
+          "`git fetch` 후 GIT_REPORT_REF 설정을 확인하세요.",
+      );
+    }
+
+    let upstream = "";
+    try {
+      upstream = await runGit(cwd, [
+        "rev-parse",
+        "--abbrev-ref",
+        "--symbolic-full-name",
+        "@{upstream}",
+      ]);
+    } catch {
+      throw new Error(
+        `현재 브랜치 '${branch}'에 upstream이 없습니다. ` +
+          "`git push -u <remote> <branch>`로 원격 추적 브랜치를 설정한 뒤 다시 시도하세요.",
+      );
+    }
+
+    try {
+      await runGit(cwd, ["rev-parse", "--verify", upstream]);
+    } catch {
+      throw new Error(
+        `현재 브랜치의 upstream '${upstream}'를 찾을 수 없습니다. ` +
+          "`git fetch` 또는 `git push -u <remote> <branch>` 후 다시 시도하세요.",
+      );
     }
 
     const upstreamHead = await runGit(cwd, ["rev-parse", upstream]);
     const trackingKey = gitReportTrackingKey(upstream, opts.author);
-    const storedHead = opts.lastReportedHeads?.[trackingKey] ?? null;
+    const legacyTrackingKey = gitReportTrackingKey(baseRef, opts.author);
+    const storedHead =
+      opts.lastReportedHeads?.[trackingKey] ??
+      opts.lastReportedHeads?.[legacyTrackingKey] ??
+      null;
     let previousReportedHead: string | null = null;
-    let revision = upstream;
+    let revision = initialGitReportRevision(baseRef, upstream);
     let initialSince: string | undefined = "7.days.ago";
 
     if (storedHead) {
@@ -220,6 +241,7 @@ export async function gitPushedLog(opts: {
     return {
       commits,
       branch,
+      baseRef,
       upstream,
       upstreamHead,
       previousReportedHead,

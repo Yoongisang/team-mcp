@@ -6,6 +6,7 @@ import {
 } from "./lib/discord.js";
 import {
   gitReportTrackingKey,
+  initialGitReportRevision,
   matchesGitAuthor,
 } from "./lib/git.js";
 import {
@@ -172,6 +173,17 @@ assert.equal(matchesGitAuthor(yoongiCommit, "윤기상"), false);
 assert.notEqual(
   gitReportTrackingKey("origin/develop", "Yoongisang"),
   gitReportTrackingKey("origin/develop", "정찬호"),
+);
+assert.equal(
+  initialGitReportRevision(
+    "origin/develop",
+    "origin/feature/save-persistence-0720",
+  ),
+  "origin/develop..origin/feature/save-persistence-0720",
+);
+assert.equal(
+  initialGitReportRevision("origin/develop", "origin/develop"),
+  "origin/develop",
 );
 
 console.log("[smoke] meeting thread and Git author selection passed");

@@ -5,7 +5,7 @@ Claude Code, Codex, Cursor에서 같은 방식으로 다루는 로컬 MCP 서버
 
 ## 주요 동작
 
-- `origin/develop` 등 지정한 보고 ref에서 회의 준비자의 개인 커밋만 수집한다.
+- `origin/develop` 등 지정한 기준 ref 이후 현재 브랜치 upstream에 push된 회의 준비자의 개인 커밋만 수집한다.
 - 커밋 원문은 AI 검토 컨텍스트로만 사용하고 Discord에는 정리된 요약을 게시한다.
 - 체크리스트 완료는 자동 반영하지 않고 사용자 확인을 거친다.
 - 회의 준비와 완료는 서울 날짜 기준 최신 `[진행]` 스레드를 사용한다.
@@ -17,7 +17,7 @@ Claude Code, Codex, Cursor에서 같은 방식으로 다루는 로컬 MCP 서버
 - Node.js 20 이상
 - Git
 - 로컬에 clone된 게임 레포
-- `origin/develop` 등 팀이 합의한 Git 보고 기준 ref
+- upstream이 설정된 작업 브랜치와 팀이 합의한 Git 비교 기준 ref
 - Discord 포럼 채널과 Bot
 - PM 기능 사용 시 Notion Integration과 Jira API 자격 증명
 
@@ -138,7 +138,7 @@ Cursor는 게임 레포의 `.cursor/mcp.json` 또는 사용자 홈의 `~/.cursor
 ```text
 prepare_meeting
   -> 체크리스트 완료 후보가 있으면 사용자 확인
-  -> 회의 준비자가 작성하고 보고 ref에 반영된 커밋만 AI가 검토·요약
+  -> 기준 ref 이후 현재 upstream에 push된 회의 준비자의 커밋만 AI가 검토·요약
   -> 오늘의 최신 [진행] 스레드에 게시하거나 새 N차 회의 생성
 
 finish_meeting
@@ -173,17 +173,18 @@ Jira 제안 원칙:
 
 `prepare_meeting`은 Discord 보고자를 Git author와 연결해 개인 커밋만 수집한다.
 
-1. `GIT_REPORT_REF`를 조회한다. 기본값은 `origin/develop`이다.
+1. 현재 브랜치 upstream과 `GIT_REPORT_REF`를 조회한다. 기준 ref 기본값은 `origin/develop`이다.
 2. `git_author`, `GIT_AUTHOR_MAP`, `user_name` 순으로 Git 작성자를 결정한다.
-3. 이전 보고 HEAD부터 현재 보고 ref HEAD 사이에서 해당 작성자의 커밋만 수집한다.
-4. 마지막 보고 HEAD는 보고 ref + 작성자별로 독립 저장한다.
-5. 보고 ref에 없는 해당 작성자의 로컬 커밋은 제외하고 개수만 표시한다.
+3. 기준 ref 이후 현재 upstream에 push된 범위에서 해당 작성자의 커밋만 수집한다.
+4. 마지막 보고 HEAD는 upstream + 작성자별로 독립 저장한다.
+5. upstream에 없는 해당 작성자의 로컬 커밋은 제외하고 개수만 표시한다.
 6. 이전 보고 HEAD가 없는 최초 실행은 최근 7일의 개인 커밋을 수집한다.
 
 ```bash
 git fetch
 git rev-parse origin/develop
-git log origin/develop --author="Git author 이름 또는 이메일"
+git rev-parse '@{upstream}'
+git log 'origin/develop..@{upstream}' --author="Git author 이름 또는 이메일"
 ```
 
 Discord 표시명과 Git author가 다르면 `.env`에 매핑한다.

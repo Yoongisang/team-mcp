@@ -78,26 +78,30 @@ npx tsx src/smoke.ts
 
 ## 4. 게임 레포 준비
 
-`prepare_meeting`은 `GAME_PROJECT_PATH`의 `GIT_REPORT_REF`에서 회의 준비자의
-Git 작성자 커밋만 수집한다. 기본 보고 ref는 `origin/develop`이다.
+`prepare_meeting`은 `GAME_PROJECT_PATH`에서 현재 브랜치의 원격 upstream을 확인하고,
+`GIT_REPORT_REF` 이후 upstream에 push된 회의 준비자의 Git 작성자 커밋만 수집한다.
+기본 비교 기준 ref는 `origin/develop`이다.
 
 ```bash
 cd /path/to/GameProject
 git fetch
 git rev-parse origin/develop
+git rev-parse @{upstream}
 ```
 
 개인 커밋 확인:
 
 ```bash
-git log origin/develop --author="Git author 이름 또는 이메일"
+git log origin/develop..@{upstream} --author="Git author 이름 또는 이메일"
 ```
 
 동작 기준:
 
 - Discord 보고자를 Git author와 연결해 개인 커밋만 수집
-- 이전에 보고한 HEAD는 보고 ref + 작성자별로 독립 추적
-- 보고 ref에 반영되지 않은 해당 작성자의 로컬 커밋은 제외
+- 이전에 보고한 HEAD는 현재 브랜치 upstream + 작성자별로 독립 추적
+- 현재 브랜치 upstream에 push된 코드와 에셋 커밋을 모두 포함
+- upstream에 반영되지 않은 해당 작성자의 로컬 커밋만 제외
+- `GIT_REPORT_REF`는 작업 범위의 시작점이며 push 판정에는 사용하지 않음
 - 최초 실행은 최근 7일의 해당 작성자 커밋 수집
 - 한 번에 해당 작성자의 신규 커밋이 200건을 넘으면 오류로 중단
 
@@ -164,7 +168,7 @@ DISCORD_TAG_SUMMARY=정리
 ```
 
 - `GAME_PROJECT_PATH`는 각 팀원 PC의 절대 경로다.
-- `GIT_REPORT_REF`는 팀 회의에 반영할 공용 Git ref다.
+- `GIT_REPORT_REF`는 개인 작업 커밋을 수집할 때 사용하는 비교 시작 ref다.
 - `GIT_AUTHOR_MAP`은 Discord 표시명과 Git author가 다를 때 사용한다. 값은 이름이나 이메일이다.
 - `DISCORD_USER_ID`는 현재 핵심 MCP 로직에서 직접 읽지는 않지만 Channels 연동과
   사용자 식별 설정을 위해 기록한다.
@@ -346,7 +350,7 @@ PM은 별도로 권한 전달을 검증한다.
 1. `prepare_meeting({ user_name })` 호출
    - 이름이 다르면 `GIT_AUTHOR_MAP`을 설정하거나 `git_author`를 함께 전달
 2. 체크리스트 완료 후보가 있으면 완료 항목 확인
-3. 보고 ref에 반영된 해당 작성자의 커밋을 AI가 검토해 `commit_summary_markdown` 작성
+3. 기준 ref 이후 현재 upstream에 push된 해당 작성자의 커밋을 AI가 검토해 `commit_summary_markdown` 작성
 4. `prepare_meeting` 재호출
 5. 오늘 `[진행]` 회의가 있으면 댓글로 추가
 6. 없으면 `스크럼 회의 YYYY-MM-DD (N차)` 생성
